@@ -1,0 +1,13 @@
+FFmpeg prebuilt package
+
+Version:                 (fill in upstream release/commit)
+Source:                  (fill in source tarball or commit URL)
+Configure:               (fill in configure arguments)
+Toolchain:               (fill in compiler/NDK/MSVC version)
+Targets:
+  Android arm64-v8a:     libffmpeg.so
+  Android armeabi-v7a:   libffmpeg.so
+  Windows x64:           not populated in this checkout
+  Linux x86_64:          not populated in this checkout
+License:                 FFmpeg is LGPL/GPL depending on the build configuration.
+                         Include the matching COPYING/LGPL/GPL license files when publishing.

@@ -1,0 +1,23 @@
+# Every submodule of this repository is declared with `update = none`: the application tree provides
+# CoralCore, libz, libyuv and libgtest itself, so its recursive submodule update must not download
+# copies that CoralMedia would never use. A standalone checkout fetches them explicitly with a
+# per-submodule strategy override; see cmake/CoralMediaDependencies.cmake.
+[submodule "third_party/libz"]
+	path = third_party/libz
+	url = https://github.com/CoralFrameworks/libz.git
+	update = none
+
+[submodule "third_party/libyuv"]
+	path = third_party/libyuv
+	url = https://github.com/CoralFrameworks/libyuv.git
+	update = none
+
+[submodule "third_party/libgtest"]
+	path = third_party/libgtest
+	url = https://github.com/CoralFrameworks/libgtest.git
+	update = none
+
+[submodule "external/CoralCore"]
+	path = external/CoralCore
+	url = https://github.com/CoralFrameworks/CoralCore.git
+	update = none
