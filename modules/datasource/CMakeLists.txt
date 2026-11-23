@@ -16,6 +16,7 @@ set(PUBLIC_HDR_DIR include)
 set(PUBLIC_HDRS
     include/datasource/AndroidDataSource.h
     include/datasource/DataSource.h
+    include/datasource/DarwinDataSource.h
     include/datasource/HttpDataSource.h
 )
 
@@ -36,6 +37,11 @@ if (WIN32)
   # The media of an http uri is read with WinHTTP, the http API of the platform.
   list(APPEND SRCS
       src/win32/WinHttpDataSource.cpp
+  )
+elseif (APPLE)
+  # The media of an http uri is read with NSURLSession, the http API of the platform.
+  list(APPEND SRCS
+      src/darwin/DarwinHttpDataSource.mm
   )
 else ()
   list(APPEND SRCS
@@ -59,6 +65,15 @@ if (ANDROID)
   )
 endif ()
 
+if (APPLE)
+  # The file of the local file system and the resource of the main bundle are read with Foundation:
+  # a url the system picker returned is security scoped, and a bundle resource is looked up rather
+  # than named by a path.
+  list(APPEND SRCS
+      src/darwin/DarwinDataSource.mm
+  )
+endif ()
+
 # ==================================================================================================
 # Include and target definitions
 # ==================================================================================================
@@ -73,6 +88,18 @@ if (ANDROID)
 endif ()
 if (WIN32)
   target_link_libraries(${TARGET} PRIVATE winhttp)
+endif ()
+if (APPLE)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  target_link_libraries(${TARGET} PRIVATE ${FOUNDATION_FRAMEWORK})
+  set_source_files_properties(
+      src/darwin/DarwinDataSource.mm
+      src/darwin/DarwinHttpDataSource.mm
+      PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+  set_target_properties(${TARGET} PROPERTIES
+      OBJCXX_STANDARD 20
+      OBJCXX_STANDARD_REQUIRED ON
+  )
 endif ()
 set_target_properties(${TARGET} PROPERTIES FOLDER Libs)
 

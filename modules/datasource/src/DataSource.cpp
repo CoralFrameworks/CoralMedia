@@ -27,6 +27,10 @@
 #include <datasource/AndroidDataSource.h>
 #endif
 
+#if defined(__APPLE__)
+#include <datasource/DarwinDataSource.h>
+#endif
+
 #include <cctype>
 #include <cerrno>
 #include <cstring>
@@ -296,6 +300,32 @@ bool AVDefaultDataSource::open(const std::string& uri) {
     }
   }
 #endif
+#if defined(__APPLE__)
+  else if (scheme == "asset" || scheme == "bundle") {
+    // A resource of the main bundle, e.g. "asset:///video/a.mp4" or "bundle:///video/a.mp4". The
+    // scheme of Android is accepted by the same data source, so a media that is named once plays on
+    // both platforms.
+    delegate = std::make_shared<AVBundleDataSource>();
+    if (!delegate->open(uri)) {
+      return false;
+    }
+  } else if ((scheme.empty() || scheme == "file") &&
+             filePathOf(uri).rfind("/android_asset/", 0) == 0) {
+    // The Android spelling of a bundled media, e.g. "file:///android_asset/video/a.mp4".
+    delegate = std::make_shared<AVBundleDataSource>();
+    if (!delegate->open(uri)) {
+      return false;
+    }
+  } else {
+    // Every other uri names a file of the local file system, either by its path or with the scheme
+    // of a file uri. The data source of the platform resolves a percent-encoded file uri, the
+    // security scope of a url the system picker returned, and a relative path of the bundle.
+    delegate = std::make_shared<AVDarwinFileDataSource>();
+    if (!delegate->open(uri)) {
+      return false;
+    }
+  }
+#else
   else {
     // Every other uri names a file of the local file system, either by its path or with the scheme of a
     // file uri: an unknown scheme is not a reason to refuse to read the media of a path that happens to
@@ -305,6 +335,7 @@ bool AVDefaultDataSource::open(const std::string& uri) {
       return false;
     }
   }
+#endif
   delegate_ = std::move(delegate);
   uri_ = uri;
   return true;

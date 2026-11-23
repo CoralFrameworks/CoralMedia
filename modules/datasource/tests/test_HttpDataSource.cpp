@@ -51,7 +51,7 @@ std::shared_ptr<AVHttpDataSource> createPlatformDataSource() {
 } // namespace anonymous
 
 TEST(AVHttpDataSourceTest, ReportsWhetherThePlatformImplementsIt) {
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
   EXPECT_TRUE(isHttpDataSourceSupported());
 #else
   EXPECT_FALSE(isHttpDataSourceSupported());

@@ -19,6 +19,16 @@
 #include <datasource/DataSource.h>
 #include <datasource/HttpDataSource.h>
 
+#if defined(__APPLE__)
+#include <datasource/DarwinDataSource.h>
+
+#include <CoreFoundation/CoreFoundation.h>
+
+#include <climits>
+#include <cstdio>
+#include <fstream>
+#endif
+
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -33,6 +43,10 @@
 using coral::AVByteArrayDataSource;
 using coral::AVDefaultDataSource;
 using coral::AVFileDataSource;
+#if defined(__APPLE__)
+using coral::AVBundleDataSource;
+using coral::AVDarwinFileDataSource;
+#endif
 using coral::AVHttpDataSource;
 using coral::AVHttpDataSourceFactory;
 using coral::test::makePattern;
@@ -225,6 +239,195 @@ TEST(AVByteArrayDataSourceTest, ReadAtWritesAtTheRequestedOffset) {
 // ==================================================================================================
 // AVDefaultDataSource
 // ==================================================================================================
+
+#if defined(__APPLE__)
+
+namespace {
+
+/** The directory the resources of the test are looked up in, i.e. the resources of the main bundle. */
+std::string bundleResourceDirectory() {
+  CFBundleRef bundle = CFBundleGetMainBundle();
+  CFURLRef url = CFBundleCopyResourcesDirectoryURL(bundle);
+  char buffer[PATH_MAX] = {};
+  const bool ok = url != nullptr &&
+                  CFURLGetFileSystemRepresentation(url, true,
+                    reinterpret_cast<UInt8*>(buffer), sizeof(buffer)) != 0;
+  if (url != nullptr) {
+    CFRelease(url);
+  }
+  return ok ? std::string(buffer) : std::string();
+}
+
+void writeFileAt(const std::filesystem::path& path, const std::vector<uint8_t>& data) {
+  std::error_code error;
+  std::filesystem::create_directories(path.parent_path(), error);
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  file.write(reinterpret_cast<const char*>(data.data()),
+    static_cast<std::streamsize>(data.size()));
+}
+
+/** The percent-encoded file url of a path, as the platform writes one. */
+std::string fileUrlOf(const std::filesystem::path& path) {
+  const std::string text = path.string();
+  CFURLRef url = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
+    reinterpret_cast<const UInt8*>(text.c_str()), text.size(), false);
+  CFStringRef string = url != nullptr ? CFURLGetString(url) : nullptr;
+  char buffer[PATH_MAX * 4] = {};
+  // CFURLGetString returns a borrowed string; only the url is owned and released here.
+  const bool ok = string != nullptr &&
+                  CFStringGetCString(string, buffer, sizeof(buffer), kCFStringEncodingUTF8) != 0;
+  if (url != nullptr) {
+    CFRelease(url);
+  }
+  return ok ? std::string(buffer) : std::string();
+}
+
+/** Removes a path of the bundle when the test ends, so that the next run starts from no resource. */
+struct BundleFixtureCleanup {
+  std::filesystem::path path;
+
+  ~BundleFixtureCleanup() {
+    std::error_code error;
+    std::filesystem::remove_all(path, error);
+  }
+};
+
+} // namespace anonymous
+
+TEST(AVDarwinFileDataSourceTest, ReadsAFileUriWithAPercentEncodedPath) {
+  const auto data = makePattern();
+  const auto path = std::filesystem::temp_directory_path() / "coral darwin 中文.bin";
+  writeFileAt(path, data);
+  const auto uri = fileUrlOf(path);
+  ASSERT_NE(std::string(), uri);
+  EXPECT_NE(std::string::npos, uri.find('%')) << "the url of a path with a space is percent-encoded";
+
+  AVDarwinFileDataSource source;
+  ASSERT_TRUE(source.open(uri)) << uri;
+  EXPECT_TRUE(source.isOpen());
+  EXPECT_EQ(uri, source.getUri());
+  EXPECT_EQ(static_cast<long>(data.size()), source.getLength());
+  std::vector<uint8_t> buffer(64);
+  ASSERT_EQ(64, source.readAt(0, buffer.data(), 0, buffer.size()));
+  EXPECT_TRUE(std::equal(buffer.begin(), buffer.end(), data.begin()));
+  source.close();
+  EXPECT_FALSE(source.isOpen());
+  EXPECT_EQ(-1, source.getLength());
+
+  // The default data source reads the same url through the data source of the platform.
+  AVDefaultDataSource defaultSource;
+  ASSERT_TRUE(defaultSource.open(uri)) << uri;
+  ASSERT_EQ(64, defaultSource.readAt(0, buffer.data(), 0, buffer.size()));
+  EXPECT_TRUE(std::equal(buffer.begin(), buffer.end(), data.begin()));
+  defaultSource.close();
+
+  std::error_code error;
+  std::filesystem::remove(path, error);
+}
+
+TEST(AVDarwinFileDataSourceTest, ReadsAFileUriWithTheLocalhostAuthority) {
+  const auto data = makePattern();
+  const auto path = std::filesystem::temp_directory_path() / "coral-darwin-localhost.bin";
+  writeFileAt(path, data);
+  const std::string uri = "file://localhost" + path.string();
+
+  AVDefaultDataSource source;
+  ASSERT_TRUE(source.open(uri)) << uri;
+  EXPECT_EQ(static_cast<long>(data.size()), source.getLength());
+  std::vector<uint8_t> buffer(16);
+  ASSERT_EQ(16, source.readAt(16, buffer.data(), 0, buffer.size()));
+  for (int i = 0; i < 16; ++i) {
+    EXPECT_EQ(static_cast<uint8_t>((16 + i) % 256), buffer[static_cast<size_t>(i)]);
+  }
+  source.close();
+
+  std::error_code error;
+  std::filesystem::remove(path, error);
+}
+
+TEST(AVDarwinFileDataSourceTest, ReportsAnUnreadableUri) {
+  AVDarwinFileDataSource source;
+  EXPECT_FALSE(source.open("file:///coral/does-not-exist.bin"));
+  EXPECT_FALSE(source.isOpen());
+  EXPECT_EQ(-1, source.getLength());
+
+  AVDefaultDataSource defaultSource;
+  EXPECT_FALSE(defaultSource.open("file:///coral/does-not-exist.bin"));
+  EXPECT_FALSE(defaultSource.isOpen());
+}
+
+TEST(AVBundleDataSourceTest, ReadsAnAssetOfTheMainBundle) {
+  const auto directory = bundleResourceDirectory();
+  ASSERT_FALSE(directory.empty());
+  const auto data = makePattern();
+  const auto path = std::filesystem::path(directory) / "coral-darwin-asset.bin";
+  BundleFixtureCleanup cleanup{ path };
+  writeFileAt(path, data);
+
+  {
+    AVBundleDataSource source;
+    ASSERT_TRUE(source.open("asset:///coral-darwin-asset.bin")) << directory;
+    EXPECT_TRUE(source.isOpen());
+    EXPECT_EQ("asset:///coral-darwin-asset.bin", source.getUri());
+    EXPECT_EQ(static_cast<long>(data.size()), source.getLength());
+    std::vector<uint8_t> buffer(32);
+    ASSERT_EQ(32, source.readAt(0, buffer.data(), 0, buffer.size()));
+    EXPECT_TRUE(std::equal(buffer.begin(), buffer.end(), data.begin()));
+    source.close();
+    EXPECT_FALSE(source.isOpen());
+  }
+
+  // The default data source dispatches the scheme, and the same resource is readable through the
+  // explicit alias of the scheme and through the Android spelling of an asset.
+  for (const std::string uri : { std::string("asset:///coral-darwin-asset.bin"),
+                                 std::string("bundle:///coral-darwin-asset.bin"),
+                                 std::string("file:///android_asset/coral-darwin-asset.bin") }) {
+    AVDefaultDataSource source;
+    ASSERT_TRUE(source.open(uri)) << uri;
+    EXPECT_EQ(static_cast<long>(data.size()), source.getLength());
+    std::vector<uint8_t> buffer(32);
+    ASSERT_EQ(32, source.readAt(0, buffer.data(), 0, buffer.size()));
+    EXPECT_TRUE(std::equal(buffer.begin(), buffer.end(), data.begin()));
+    source.close();
+  }
+}
+
+TEST(AVBundleDataSourceTest, ReadsAnAssetNamedWithAnAuthorityAndAPercentEncodedPath) {
+  const auto directory = bundleResourceDirectory();
+  ASSERT_FALSE(directory.empty());
+  const auto data = makePattern();
+  const auto path = std::filesystem::path(directory) / "coral-darwin-assets" / "coral asset 中.bin";
+  BundleFixtureCleanup cleanup{ std::filesystem::path(directory) / "coral-darwin-assets" };
+  writeFileAt(path, data);
+
+  AVBundleDataSource source;
+  ASSERT_TRUE(source.open("asset://coral-darwin-assets/coral%20asset%20%E4%B8%AD.bin"));
+  EXPECT_EQ(static_cast<long>(data.size()), source.getLength());
+  std::vector<uint8_t> buffer(16);
+  ASSERT_EQ(16, source.readAt(8, buffer.data(), 0, buffer.size()));
+  for (int i = 0; i < 16; ++i) {
+    EXPECT_EQ(static_cast<uint8_t>((8 + i) % 256), buffer[static_cast<size_t>(i)]);
+  }
+  source.close();
+}
+
+TEST(AVBundleDataSourceTest, RefusesAPathThatLeavesTheBundle) {
+  AVBundleDataSource source;
+  EXPECT_FALSE(source.open("asset:///../coral-darwin-outside.bin"));
+  EXPECT_FALSE(source.isOpen());
+
+  AVDefaultDataSource defaultSource;
+  EXPECT_FALSE(defaultSource.open("asset:///../coral-darwin-outside.bin"));
+}
+
+TEST(AVBundleDataSourceTest, FailsForAMissingAsset) {
+  AVBundleDataSource source;
+  EXPECT_FALSE(source.open("asset:///coral-darwin-does-not-exist.bin"));
+  EXPECT_FALSE(source.isOpen());
+  EXPECT_EQ(-1, source.getLength());
+}
+
+#endif // defined(__APPLE__)
 
 TEST(AVDefaultDataSourceTest, ReadsAFileOfTheLocalFileSystem) {
   // A path of the platform holds a colon after its drive letter, which is not the scheme of a uri.

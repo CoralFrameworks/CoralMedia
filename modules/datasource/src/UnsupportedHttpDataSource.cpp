@@ -17,7 +17,8 @@
 /**
  * @file UnsupportedHttpDataSource.cpp
  *
- * The http data source of the platforms that do not implement one, i.e. every platform but Windows.
+ * The http data source of the platforms that do not implement one, i.e. every platform but Windows
+ * and Apple.
  *
  * <p>It exists so that the interface of the module, and the factory an application creates the data
  * source with, are the same on every platform: the factory of a platform that does not implement one

@@ -190,6 +190,15 @@ private:
  * Android binding registers with {@code jni::ApplicationContext}, therefore an asset or a content uri
  * is only readable once that context is registered.
  *
+ * <p>On macOS and iOS the local media is read with the data sources of {@code DarwinDataSource.h}:
+ * a plain path or a {@code file} uri (including a percent-encoded path, the default authority and a
+ * url the system picker returned, whose security scope the data source starts), and an
+ * {@code asset} or {@code bundle} uri of a resource of the main bundle. The Android spelling of a
+ * bundled media, {@code file:///android_asset/...}, names the same resource on Apple, so a media
+ * that is named once is playable on every platform. The media of the Photos library is not a stream
+ * of bytes the system hands out: the application exports the asset, or hands over the file url the
+ * system picker returned.
+ *
  * <p>The data source of the scheme is created by {@link open} and owned by this instance, which releases
  * it when it is closed: the two follow the RAII idiom together.
  */
