@@ -17,8 +17,10 @@
 #include "SubtitleTextUtil.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <functional>
 #include <limits>
 #include <utility>
@@ -262,6 +264,21 @@ bool parseFloat(const std::string_view value, float& out) {
   if (value.empty()) {
     return false;
   }
+#if defined(__APPLE__)
+  // Floating point `std::from_chars` was introduced in the iOS 26 / macOS 26 SDKs, so the Apple
+  // build would otherwise require a deployment target the rest of the framework does not. The
+  // parser is only used for a decimal number of a subtitle document, which `strtof` parses with
+  // the same range checks.
+  const std::string text(value);
+  char* end = nullptr;
+  errno = 0;
+  const float parsed = std::strtof(text.c_str(), &end);
+  if (end != text.c_str() + text.size() || errno == ERANGE || !std::isfinite(parsed)) {
+    return false;
+  }
+  out = parsed;
+  return true;
+#else
   float parsed = 0.0f;
   const char* begin = value.data();
   const char* end = begin + value.size();
@@ -271,6 +288,7 @@ bool parseFloat(const std::string_view value, float& out) {
   }
   out = parsed;
   return true;
+#endif
 }
 
 bool parseWebvttTimestamp(const std::string_view value, int64_t& outUs) {

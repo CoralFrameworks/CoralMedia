@@ -25,6 +25,10 @@
 #include "win/WmfAudioFileWriter.h"
 #endif
 
+#if defined(__APPLE__)
+#include "darwin/DarwinAudioFileWriter.h"
+#endif
+
 namespace coral {
 
 AudioFileWriter::~AudioFileWriter() noexcept = default;
@@ -51,6 +55,14 @@ AudioFileWriter::CreateWithUrl(const std::string& url,
   // the media foundation sink writer handles the containers and the compressed audio codecs
   // which are provided by the Windows platform.
   if (auto writer = WmfAudioFileWriter::sniff(url, fileType, format)) {
+    return writer;
+  }
+#endif
+
+#if defined(__APPLE__)
+  // the ExtAudioFile based writer handles the containers and the compressed audio codecs which
+  // are provided by the platform.
+  if (auto writer = DarwinAudioFileWriter::sniff(url, fileType, format)) {
     return writer;
   }
 #endif

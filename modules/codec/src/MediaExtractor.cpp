@@ -29,6 +29,12 @@
 
 #endif
 
+#if defined(__APPLE__)
+
+#include "darwin/DarwinMediaExtractor.h"
+
+#endif
+
 namespace coral {
 
 AVMediaExtractor::~AVMediaExtractor() noexcept = default;
@@ -139,6 +145,11 @@ BuiltinExtractorFactory::createPlatformExtractor(const std::string& url) {
 
   // the Windows media foundation source reader based extractor
   return WmfMediaExtractor::createWithUrl(url);
+
+#elif defined(__APPLE__)
+
+  // the AVFoundation asset reader based extractor
+  return DarwinMediaExtractor::createWithUrl(url);
 
 #else
 

@@ -29,6 +29,12 @@
 
 #endif
 
+#if defined(__APPLE__)
+
+#include "darwin/DarwinMediaMuxer.h"
+
+#endif
+
 namespace coral {
 
 namespace {
@@ -55,6 +61,12 @@ bool BuiltinMuxerFactory::isSupportMuxerFormat(MuxerFormat muxerFormat) {
     return true;
   }
 #endif
+#if defined(__APPLE__)
+  // only the containers which are supported by the AVAssetWriter are available.
+  if (DarwinMediaMuxer::isSupportedFormat(muxerFormat)) {
+    return true;
+  }
+#endif
   return false;
 }
 
@@ -68,6 +80,10 @@ std::unique_ptr<AVMediaMuxer> BuiltinMuxerFactory::createMuxer() {
 
 #if defined(WINDOWS) || defined(WIN32)
   return std::make_unique<WmfMediaMuxer>();
+#endif
+
+#if defined(__APPLE__)
+  return std::make_unique<DarwinMediaMuxer>();
 #endif
 
   return {};

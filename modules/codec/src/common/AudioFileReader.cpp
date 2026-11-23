@@ -28,6 +28,10 @@
 #include "win/WmfAudioFileReader.h"
 #endif
 
+#if defined(__APPLE__)
+#include "darwin/DarwinAudioFileReader.h"
+#endif
+
 namespace coral {
 
 AudioFileReader::~AudioFileReader() = default;
@@ -49,6 +53,12 @@ AudioFileReader::CreateWithUrl(const std::string& inputUrl) {
 #if defined(WINDOWS) || defined(WIN32)
   if (reader == nullptr) {
     reader = WmfAudioFileReader::sniff(inputUrl);
+  }
+#endif
+
+#if defined(__APPLE__)
+  if (reader == nullptr) {
+    reader = DarwinAudioFileReader::sniff(inputUrl);
   }
 #endif
 

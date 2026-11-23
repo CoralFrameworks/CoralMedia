@@ -21,6 +21,7 @@ set(PUBLIC_HDRS
     include/media/PixelBufferHandle.h
     include/media/PixelBufferD3D11.h
     include/media/PixelBufferAndroid.h
+    include/media/PixelBufferIOSurface.h
     include/media/SyncToken.h
     include/media/SyncTokenD3D11.h
     include/media/SurfaceFrameSource.h
@@ -53,6 +54,10 @@ if(ANDROID)
     list(APPEND SRCS src/PixelBufferAndroid.cpp)
 endif()
 
+if(APPLE)
+    list(APPEND SRCS src/PixelBufferIOSurface.cpp)
+endif()
+
 # ==================================================================================================
 # Includes & target definition
 # ==================================================================================================
@@ -74,6 +79,13 @@ if(WIN32)
 endif()
 if(ANDROID)
     target_link_libraries(${TARGET} PUBLIC android)
+endif()
+
+if(APPLE)
+    # The IOSurface pixel buffer wraps CVPixelBuffer, which comes from CoreVideo.
+    find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    target_link_libraries(${TARGET} PUBLIC ${COREVIDEO_FRAMEWORK} ${COREFOUNDATION_FRAMEWORK})
 endif()
 
 # ==================================================================================================

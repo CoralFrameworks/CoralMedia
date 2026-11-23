@@ -31,6 +31,13 @@
 cmake_minimum_required(VERSION 3.19)
 project(CoralMedia LANGUAGES CXX)
 
+# The Apple platform layer of the codec module is Objective-C++: the AVFoundation extractor and
+# muxer are written against the Objective-C classes of the framework. The language has to be
+# enabled before the module is added, otherwise CMake has no rule for its `.mm` sources.
+if (APPLE)
+  enable_language(OBJCXX)
+endif ()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

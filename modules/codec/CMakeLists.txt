@@ -83,6 +83,34 @@ if (ANDROID)
 endif ()
 
 
+if (APPLE)
+  # The Darwin platform layer. The audio codecs and the audio files are AudioToolbox based and
+  # plain C++; the video codecs are VideoToolbox based and plain C++; the extractor and the muxer
+  # are AVFoundation based and Objective-C++ because those classes only exist as Objective-C.
+  list(APPEND SRCS
+      src/darwin/DarwinAudioDecoder.cpp
+      src/darwin/DarwinAudioDecoder.h
+      src/darwin/DarwinAudioEncoder.cpp
+      src/darwin/DarwinAudioEncoder.h
+      src/darwin/DarwinAudioFileReader.cpp
+      src/darwin/DarwinAudioFileReader.h
+      src/darwin/DarwinAudioFileWriter.cpp
+      src/darwin/DarwinAudioFileWriter.h
+      src/darwin/DarwinHardwarePixelBuffer.cpp
+      src/darwin/DarwinHardwarePixelBuffer.h
+      src/darwin/DarwinMediaUtils.cpp
+      src/darwin/DarwinMediaUtils.h
+      src/darwin/DarwinVideoDecoder.cpp
+      src/darwin/DarwinVideoDecoder.h
+      src/darwin/DarwinVideoEncoder.cpp
+      src/darwin/DarwinVideoEncoder.h
+      src/darwin/DarwinMediaExtractor.mm
+      src/darwin/DarwinMediaExtractor.h
+      src/darwin/DarwinMediaMuxer.mm
+      src/darwin/DarwinMediaMuxer.h
+  )
+endif ()
+
 if (WIN32)
   list(APPEND SRCS
       src/win/WmfAudioDecoder.cpp
@@ -138,6 +166,40 @@ endif ()
 if (WIN32)
   # The hardware output path views and shares ID3D11Texture2D, whose IIDs are in d3d11.lib.
   target_link_libraries(${TARGET} PRIVATE mfplat mfreadwrite mfuuid mf mfcore ole32 d3d11)
+endif ()
+
+if (APPLE)
+  # The platform layers: AVFoundation for the containers, AudioToolbox for the audio codecs and the
+  # audio files, VideoToolbox/CoreVideo for the video codecs and their zero-copy frames.
+  find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
+  find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
+  find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
+  find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
+  find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+  find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+  find_library(COREGRAPHICS_FRAMEWORK CoreGraphics REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  target_link_libraries(${TARGET} PRIVATE
+      ${AVFOUNDATION_FRAMEWORK}
+      ${AUDIOTOOLBOX_FRAMEWORK}
+      ${VIDEOTOOLBOX_FRAMEWORK}
+      ${COREMEDIA_FRAMEWORK}
+      ${COREVIDEO_FRAMEWORK}
+      ${COREFOUNDATION_FRAMEWORK}
+      ${COREGRAPHICS_FRAMEWORK}
+      ${FOUNDATION_FRAMEWORK}
+  )
+  # The AVFoundation classes are only usable under ARC; the two `.mm` translation units are the only
+  # Objective-C++ the target compiles.
+  set_source_files_properties(
+      src/darwin/DarwinMediaExtractor.mm
+      src/darwin/DarwinMediaMuxer.mm
+      PROPERTIES COMPILE_OPTIONS "-fobjc-arc"
+  )
+  set_target_properties(${TARGET} PROPERTIES
+      OBJCXX_STANDARD 20
+      OBJCXX_STANDARD_REQUIRED ON
+  )
 endif ()
 
 if (WIN32)

@@ -42,6 +42,10 @@ public:
    *
    * Windows: an `ID3D11Device*`. The decoder opens a Media Foundation device manager on it and asks the
    * MFT to draw into textures from that device's pool.
+   *
+   * macOS/iOS: an optional `id<MTLDevice>` (or null). VideoToolbox does not need a device to allocate its
+   * `CVPixelBuffer`s -- they are `IOSurface` backed and any Metal device can wrap them -- so the device is
+   * only a hint, and a surface whose `getNativeDevice()` is null still requests the zero-copy output.
    */
   [[nodiscard]] virtual void* getNativeDevice() const = 0;
 };
@@ -73,6 +77,10 @@ public:
    *
    * Windows: an `ID3D11Texture2D*`. It is borrowed, not owned: the buffer keeps the reference the decoder
    * pool gave it.
+   *
+   * macOS/iOS: a `CVPixelBufferRef` (an `IOSurface` backed bi-planar 4:2:0 pixel buffer), which is what a
+   * `CVMetalTextureCache` or a `CVOpenGLTextureCache` imports. It is borrowed in the same way: the buffer
+   * keeps its own reference.
    */
   [[nodiscard]] virtual void* getNativeTexture() const = 0;
 

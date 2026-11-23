@@ -34,6 +34,14 @@
 
 #endif
 
+#if defined(__APPLE__)
+
+#include "darwin/DarwinMediaUtils.h"
+#include "darwin/DarwinVideoDecoder.h"
+#include "darwin/DarwinVideoEncoder.h"
+
+#endif
+
 #include <minilog/log.h>
 
 namespace coral {
@@ -65,6 +73,12 @@ bool VideoCodecFactoryImpl::isSupportedCodec(const VideoCodecType codecType, boo
   const WmfMediaScope mediaScope;
 #endif
   if (decoder) {
+#if defined(__APPLE__)
+    // VideoToolbox provides the decoders of the platform.
+    if (darwin::isVideoDecoderSupported(codecType)) {
+      return true;
+    }
+#endif
 #if defined(ANDROID) || defined(__ANDROID__)
     // android platform decoding supported
     if (MediaCodecUtils::supportVideoDecoding(codecType)) {
@@ -80,6 +94,12 @@ bool VideoCodecFactoryImpl::isSupportedCodec(const VideoCodecType codecType, boo
     }
 #endif
   } else {
+#if defined(__APPLE__)
+    // VideoToolbox provides the encoders of the platform.
+    if (darwin::isVideoEncoderSupported(codecType)) {
+      return true;
+    }
+#endif
 #if defined(ANDROID) || defined(__ANDROID__)
     // android platform encoding supported
     if (MediaCodecUtils::supportVideoDecoding(codecType)) {
@@ -118,6 +138,14 @@ VideoCodecFactoryImpl::createVideoDecoder(const VideoCodecType codecType, const 
   }
 #endif
 
+#if defined(__APPLE__)
+  // VideoToolbox is the video decoder of the platform. Its hardware accelerated decoder is
+  // requested for both manufacturers: the software path is the fallback of the same session
+  // when the platform cannot decode the stream in hardware.
+  static_cast<void>(manufacturer);
+  return std::make_unique<DarwinVideoDecoder>();
+#endif
+
 #if defined(WINDOWS) || defined(WIN32)
   // the windows platform video codecs are provided by the media foundation transforms, the
   // manufacturer is not relevant for the system provided codecs.
@@ -150,6 +178,15 @@ VideoCodecFactoryImpl::createVideoEncoder(const VideoCodecType codecType, const 
       return std::make_unique<MediaCodecVideoEncoder>(surfaceHolder);
     }
   }
+#endif
+
+#if defined(__APPLE__)
+  // VideoToolbox takes its frames through queueInputBuffer, including zero-copy frames whose
+  // pixel buffer a HardwarePixelBuffer carries, so the Android style input SurfaceHolder is not
+  // used: the encoder is created the same way for both manufacturers.
+  static_cast<void>(surfaceHolder);
+  static_cast<void>(manufacturer);
+  return std::make_unique<DarwinVideoEncoder>(codecType);
 #endif
 
 #if defined(WINDOWS) || defined(WIN32)

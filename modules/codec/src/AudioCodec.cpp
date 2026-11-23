@@ -35,6 +35,14 @@
 
 #endif
 
+#if defined(__APPLE__)
+
+#include "darwin/DarwinAudioDecoder.h"
+#include "darwin/DarwinAudioEncoder.h"
+#include "darwin/DarwinMediaUtils.h"
+
+#endif
+
 #include "PcmAudioDecoder.h"
 
 namespace coral {
@@ -65,6 +73,12 @@ bool AudioCodecFactoryImpl::isSupportedCodec(const AudioFormatType codecType, bo
   const WmfMediaScope mediaScope;
 #endif
   if (decoder) {
+#if defined(__APPLE__)
+    // AudioToolbox provides the decoders of the platform.
+    if (darwin::isAudioDecoderSupported(codecType)) {
+      return true;
+    }
+#endif
 #if defined(ANDROID) || defined(__ANDROID__)
     // android platform decoding supported
     if (MediaCodecUtils::supportAudioDecoding(codecType)) {
@@ -80,6 +94,12 @@ bool AudioCodecFactoryImpl::isSupportedCodec(const AudioFormatType codecType, bo
     }
 #endif
   } else {
+#if defined(__APPLE__)
+    // AudioToolbox provides the encoders of the platform.
+    if (darwin::isAudioEncoderSupported(codecType)) {
+      return true;
+    }
+#endif
 #if defined(ANDROID) || defined(__ANDROID__)
     // android platform encoding supported
     if (MediaCodecUtils::supportAudioEncoding(codecType)) {
@@ -114,6 +134,12 @@ AudioCodecFactoryImpl::createDecoder(const std::string& mimeType, bool outputFlo
   }
 #endif
 
+#if defined(__APPLE__)
+  if (isSupportedCodec(MediaUtils::convertToAudioFormatType(mimeType), true)) {
+    return std::make_unique<DarwinAudioDecoder>(outputFloat);
+  }
+#endif
+
 #if defined(WINDOWS) || defined(WIN32)
   if (isSupportedCodec(MediaUtils::convertToAudioFormatType(mimeType), true)) {
     return std::make_unique<WmfAudioDecoder>(outputFloat);
@@ -140,6 +166,13 @@ AudioCodecFactoryImpl::createEncoder(const AudioFormatType codecType, const Code
       return std::make_unique<MediaCodecAudioEncoder>();
     }
   }
+#endif
+
+#if defined(__APPLE__)
+  // the AudioToolbox encoder is the encoder of the platform, the manufacturer is not relevant for
+  // the system provided codecs.
+  static_cast<void>(manufacturer);
+  return std::make_unique<DarwinAudioEncoder>(codecType);
 #endif
 
 #if defined(WINDOWS) || defined(WIN32)
