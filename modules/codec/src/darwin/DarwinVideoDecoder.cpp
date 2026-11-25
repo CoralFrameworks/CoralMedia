@@ -406,6 +406,23 @@ void DarwinVideoDecoder::drainAsynchronousFrames() {
   if (status != noErr) {
     darwin::logStatus(status, "failed to wait for the decoded video frames");
   }
+  // Every callback has run, so no further frame can precede the held ones; hand them out in order.
+  flushReorderFrames();
+}
+
+void DarwinVideoDecoder::flushReorderFrames() {
+  std::vector<std::shared_ptr<AVPixelBuffer>> ordered;
+  {
+    std::lock_guard<std::mutex> lock(mFrameMutex);
+    ordered.reserve(mReorderFrames.size());
+    for (auto& entry : mReorderFrames) {
+      ordered.push_back(std::move(entry.second));
+    }
+    mReorderFrames.clear();
+  }
+  for (auto& frame : ordered) {
+    pushPendingFrame(std::move(frame));
+  }
 }
 
 std::shared_ptr<AVPacketBuffer> DarwinVideoDecoder::dequeueInputBuffer() {
@@ -420,7 +437,7 @@ std::shared_ptr<AVPacketBuffer> DarwinVideoDecoder::dequeueInputBuffer() {
   }
   {
     std::lock_guard<std::mutex> lock(mFrameMutex);
-    if (mPendingFrames.size() >= MAX_PENDING_FRAMES_FOR_INPUT) {
+    if (mPendingFrames.size() + mReorderFrames.size() >= MAX_PENDING_FRAMES_FOR_INPUT) {
       return nullptr;
     }
   }
@@ -593,7 +610,44 @@ void DarwinVideoDecoder::onFrameDecoded(const OSStatus status, CVImageBufferRef 
       timeUs < outputStartTimeUs) {
     frame->shouldBeSkipped = true;
   }
-  pushPendingFrame(std::move(frame));
+  // A frame without a presentation time cannot be placed relative to the others; hand it out in the
+  // order the session produced it rather than leaving it in the reorder buffer forever.
+  if (timeUs == Definitions::kTimeUnset) {
+    pushPendingFrame(std::move(frame));
+    return;
+  }
+
+  // VideoToolbox calls back in decode order. A frame is held until a later frame with a larger
+  // presentation time arrives; then every held frame can be handed out sorted by presentation time.
+  // For a stream without reordering this only holds the current frame until the next one arrives,
+  // and for a B-frame run it emits the whole run in display order as soon as the next P frame is
+  // decoded, so the caller never sees the decode order.
+  {
+    std::lock_guard<std::mutex> lock(mFrameMutex);
+    if (!mReorderFrames.empty()) {
+      const auto maxPresentationTimeUs = mReorderFrames.rbegin()->first;
+      if (timeUs > maxPresentationTimeUs) {
+        for (auto& entry : mReorderFrames) {
+          if (mPendingFrames.size() >= MAX_PENDING_FRAMES) {
+            mPendingFrames.pop_front();
+          }
+          mPendingFrames.push_back(std::move(entry.second));
+        }
+        mReorderFrames.clear();
+      }
+    }
+    mReorderFrames.emplace(timeUs, std::move(frame));
+    // A stream whose timestamps never advance cannot flush the buffer; bound it like the pending
+    // queue and let the caller consume the oldest frames.
+    while (mReorderFrames.size() > MAX_PENDING_FRAMES) {
+      auto oldest = mReorderFrames.begin();
+      if (mPendingFrames.size() >= MAX_PENDING_FRAMES) {
+        mPendingFrames.pop_front();
+      }
+      mPendingFrames.push_back(std::move(oldest->second));
+      mReorderFrames.erase(oldest);
+    }
+  }
 }
 
 std::shared_ptr<AVPixelBuffer> DarwinVideoDecoder::createHardwareFrameBuffer(
@@ -695,6 +749,7 @@ void DarwinVideoDecoder::discardPendingFrames() {
   {
     std::lock_guard<std::mutex> lock(mFrameMutex);
     frames.swap(mPendingFrames);
+    mReorderFrames.clear();
   }
   // The frames are destroyed outside the lock: a hardware frame releases its pixel buffer with
   // itself, which must not happen while the decoder thread is waiting for the queue.

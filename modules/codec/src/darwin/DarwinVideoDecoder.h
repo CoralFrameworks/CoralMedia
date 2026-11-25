@@ -32,6 +32,7 @@
 
 #include <atomic>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
 
@@ -132,6 +133,16 @@ private:
 
   void pushPendingFrame(std::shared_ptr<AVPixelBuffer> frame);
 
+  /**
+   * Moves the frames the session delivered out of display order into the pending queue.
+   *
+   * <p>The session calls back in decode order. Holding a frame until the next frame with a larger
+   * presentation time arrives lets the whole reordered run be handed out sorted, without a fixed
+   * lookahead which would delay streams that have no reordering at all. Called after the session has
+   * delivered every frame (end of stream, flush, release).
+   */
+  void flushReorderFrames();
+
   /** Drops the frames which were decoded but not handed out; the caller keeps the ones it holds. */
   void discardPendingFrames();
 
@@ -195,6 +206,15 @@ private:
    * than making the decoder grow without limit.
    */
   std::deque<std::shared_ptr<AVPixelBuffer>> mPendingFrames;
+
+  /**
+   * The frames delivered in decode order, sorted by presentation time.
+   *
+   * A frame is moved to {@link mPendingFrames} when a later-delivered frame has a larger
+   * presentation time: at that point no still-missing frame of the reordered run can precede it.
+   * The container is protected by {@link mFrameMutex}, like the pending queue.
+   */
+  std::multimap<int64_t, std::shared_ptr<AVPixelBuffer>> mReorderFrames;
 
   /** The decoded frames which were handed to the caller and not released yet. */
   std::atomic_int mOutstandingOutputCount { 0 };
