@@ -19,6 +19,7 @@
 
 #if defined(__APPLE__)
 
+#include <codec/HardwareVideo.h>
 #include <codec/MediaCodec.h>
 
 #include <media/ColorInfo.h>
@@ -39,9 +40,12 @@ namespace coral {
 /**
  * The implementation of the VideoDecoder based on an Apple VideoToolbox decompression session.
  *
- * Every decoded frame is bi-planar 4:2:0 (`kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`). A frame
- * is either the `CVPixelBuffer` the session produced -- an `IOSurface` backed buffer which a GPU
- * consumer samples without a copy -- or a copy of its planes in an {@link NV12PixelBuffer}.
+ * Every decoded frame is either the `CVPixelBuffer` the session produced -- an `IOSurface` backed
+ * buffer which a GPU consumer samples without a copy -- or a copy of its planes in an
+ * {@link NV12PixelBuffer}. A hardware frame is bi-planar 4:2:0
+ * (`kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange`) by default, or one packed BGRA plane
+ * (`kCVPixelFormatType_32BGRA`) when the input format's `processFormat` asks for it. That lets a
+ * consumer that samples one RGBA texture stay zero-copy.
  *
  * The surface the decoder is configured with is what decides which of the two the caller gets. A
  * {@link HardwareVideoSurface} asks for the platform buffers; any other surface is a request this
@@ -158,6 +162,13 @@ private:
    * running; the callback reads it without a lock.
    */
   std::shared_ptr<VideoSurface> mHardwareSurface;
+
+  /** The layout of a hardware frame: NV12 by default, BGRA when the format asked for it. */
+  HardwarePixelBuffer::TextureFormat mHardwareTextureFormat =
+      HardwarePixelBuffer::TextureFormat::kNv12;
+
+  /** The format reported for hardware frames; mirrors {@link mHardwareTextureFormat}. */
+  PixelFormat mHardwarePixelFormat = PixelFormat::kFormatNV12;
 
   std::shared_ptr<MediaFormat> mOutputFormat;
 

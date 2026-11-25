@@ -75,6 +75,7 @@ MediaFormat::MediaFormat()
     mRotationDegrees(NO_VALUE),
     mVideoCodecType(VideoCodecType::kVideoCodecTypeInvalid),
     mPixelFormat(PixelFormat::kFormatInvalid),
+    mProcessFormat(PixelFormat::kFormatInvalid),
     mIFrameInterval(NO_VALUE),
     mMaxBFrames(0),
     mSubsampleOffsetUs(0),
@@ -160,6 +161,7 @@ std::shared_ptr<MediaFormat> MediaFormat::buildUpon() const {
   format->mColorInfo = mColorInfo;
   format->mVideoCodecType = mVideoCodecType;
   format->mPixelFormat = mPixelFormat;
+  format->mProcessFormat = mProcessFormat;
   format->mIFrameInterval = mIFrameInterval;
   format->mMaxBFrames = mMaxBFrames;
   format->mMaxSubLayers = mMaxSubLayers;
@@ -206,6 +208,9 @@ std::string MediaFormat::toString() const {
        .append(std::to_string(mRotationDegrees))
        .append(",\npixelformat=")
        .append(convertToText((mPixelFormat)));
+    if (mProcessFormat != PixelFormat::kFormatInvalid) {
+      str.append(",\nprocess-format=").append(convertToText((mProcessFormat)));
+    }
     if (mFrameRate != NO_VALUE) {
       str.append(",\nframe-rate=").append(std::to_string(mFrameRate));
     }

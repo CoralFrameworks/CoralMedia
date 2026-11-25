@@ -204,6 +204,9 @@ const char* convertToText<PixelFormat>(const PixelFormat format) {
     case PixelFormat::kFormatInvalid: {
       return "invalid";
     }
+    case PixelFormat::kFormatSurface: {
+      return "surface";
+    }
     case PixelFormat::kFormatI420: {
       return "i420";
     }
@@ -212,6 +215,9 @@ const char* convertToText<PixelFormat>(const PixelFormat format) {
     }
     case PixelFormat::kFormatRGBA: {
       return "rgba";
+    }
+    case PixelFormat::kFormatBGRA: {
+      return "bgra";
     }
     case PixelFormat::kFormatGray: {
       return "gray";

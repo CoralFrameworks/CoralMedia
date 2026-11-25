@@ -187,6 +187,24 @@ public:
 
   [[nodiscard]] PixelFormat getPixelFormat() const { return mPixelFormat; }
 
+  /**
+   * Requests the raw frame layout this codec should process.
+   *
+   * <p>The direction follows the codec's role: for a decoder it is the layout of the frames the
+   * decoder produces, and for an encoder it is the layout of the frames the caller feeds it. This
+   * is a hint rather than a promise: a codec that cannot honour it keeps its platform default, and
+   * the caller falls back to a conversion. The default is {@link PixelFormat::kFormatInvalid},
+   * which leaves the codec's choice untouched.
+   *
+   * <p>An Apple consumer that samples one BGRA IOSurface sets this to
+   * {@link PixelFormat::kFormatBGRA}; VideoToolbox then converts YUV to RGB while decoding, and the
+   * frame needs no second GPU conversion. No encoder honours the field yet; it is part of the
+   * format so an encoder can later request its input layout without another API change.
+   */
+  void setProcessFormat(const PixelFormat format) { mProcessFormat = format; }
+
+  [[nodiscard]] PixelFormat getProcessFormat() const { return mProcessFormat; }
+
   [[nodiscard]] int getFrameRate() const { return mFrameRate; }
 
   void setFrameRate(const int frameRate) { mFrameRate = frameRate; }
@@ -486,6 +504,12 @@ private:
    * The pixel format for the video frame, or {@link PixelFormat::kFormatInvalid} if unknown or not applicable
    */
   PixelFormat mPixelFormat;
+
+  /**
+   * The raw frame layout this codec should process, or {@link PixelFormat::kFormatInvalid} to keep
+   * the codec's default. A decoder reads it as its output layout and an encoder as its input layout.
+   */
+  PixelFormat mProcessFormat;
 
   /**
    * The frame interval for the video, or {@link Definitions::kUnspecified} if unknown or not applicable

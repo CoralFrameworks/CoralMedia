@@ -84,15 +84,19 @@ bool isFourByteLengthPrefixed(const uint8_t* data, const size_t size) {
   return offset == size;
 }
 
-/** The attributes which make the session produce an NV12 surface a GPU can sample. */
-CFMutableDictionaryRef createDestinationImageBufferAttributes() {
+/** The attributes which make the session produce a surface a GPU can sample. */
+CFMutableDictionaryRef createDestinationImageBufferAttributes(
+    const HardwarePixelBuffer::TextureFormat hardwareFormat) {
   auto attributes = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
     &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
   if (attributes == nullptr) {
     return nullptr;
   }
 
-  const auto pixelFormat = static_cast<int32_t>(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+  const auto pixelFormat = static_cast<int32_t>(
+    hardwareFormat == HardwarePixelBuffer::TextureFormat::kRgba
+      ? kCVPixelFormatType_32BGRA
+      : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
   auto formatNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pixelFormat);
   if (formatNumber != nullptr) {
     CFDictionarySetValue(attributes, kCVPixelBufferPixelFormatTypeKey, formatNumber);
@@ -165,6 +169,11 @@ bool isBiPlanar420(CVPixelBufferRef pixelBuffer) {
          format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
 }
 
+/** Whether the pixel buffer holds the packed BGRA the session was asked for. */
+bool isBgra8(CVPixelBufferRef pixelBuffer) {
+  return CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA;
+}
+
 } // namespace
 
 DarwinVideoDecoder::DarwinVideoDecoder() = default;
@@ -219,6 +228,25 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
     return false;
   }
 
+  // A hardware surface can honour the format's process format: BGRA lets a consumer that samples one
+  // RGBA texture stay zero-copy, while the default NV12 is what a YUV consumer wants. A format
+  // without a process format, or a CPU decode, keeps the platform default.
+  mHardwareTextureFormat = HardwarePixelBuffer::TextureFormat::kNv12;
+  mHardwarePixelFormat = PixelFormat::kFormatNV12;
+  if (mHardwareSurface != nullptr) {
+    const auto requested = format->getProcessFormat();
+    if (requested == PixelFormat::kFormatBGRA) {
+      mHardwareTextureFormat = HardwarePixelBuffer::TextureFormat::kRgba;
+      mHardwarePixelFormat = PixelFormat::kFormatBGRA;
+    } else if (requested != PixelFormat::kFormatInvalid) {
+      MINILOG_DEBUG("the Darwin decoder ignores the requested process format {}; "
+                    "hardware frames stay NV12", static_cast<int>(requested));
+    }
+  } else if (format->getProcessFormat() == PixelFormat::kFormatBGRA) {
+    MINILOG_DEBUG("the Darwin decoder keeps CPU frames in NV12; the process format needs a "
+                  "hardware surface");
+  }
+
   {
     std::lock_guard<std::mutex> lock(mFormatMutex);
     mWidth = width;
@@ -228,25 +256,44 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
     rebuildOutputFormatLocked();
   }
 
-  // The attributes are copied by the session, the specification is only read while it is created.
-  const auto imageBufferAttributes = createDestinationImageBufferAttributes();
-  if (imageBufferAttributes == nullptr) {
-    MINILOG_ERROR("failed to configure the video decoder: "
-                  "the destination image buffer attributes could not be created");
-    release();
-    return false;
-  }
   const auto decoderSpecification = createDecoderSpecification();
-
   VTDecompressionOutputCallbackRecord callbackRecord {};
   callbackRecord.decompressionOutputCallback = &DarwinVideoDecoder::decompressionOutputCallback;
   callbackRecord.decompressionOutputRefCon = this;
-  const auto status = VTDecompressionSessionCreate(kCFAllocatorDefault, mFormatDescription,
-    decoderSpecification, imageBufferAttributes, &callbackRecord, &mSession);
+
+  // The attributes are copied by the session, the specification is only read while it is created.
+  const auto createSession = [&](const HardwarePixelBuffer::TextureFormat hardwareFormat,
+                                 OSStatus* outStatus) {
+    const auto attributes = createDestinationImageBufferAttributes(hardwareFormat);
+    if (attributes == nullptr) {
+      *outStatus = paramErr;
+      return;
+    }
+    mSession = nullptr;
+    *outStatus = VTDecompressionSessionCreate(kCFAllocatorDefault, mFormatDescription,
+      decoderSpecification, attributes, &callbackRecord, &mSession);
+    CFRelease(attributes);
+  };
+
+  OSStatus status = noErr;
+  createSession(mHardwareTextureFormat, &status);
+  if ((status != noErr || mSession == nullptr) &&
+      mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kRgba) {
+    // Some VideoToolbox decoders cannot deliver 32BGRA. Keep the session usable by falling back to
+    // the platform layout; the consumer can then convert the frame itself.
+    MINILOG_WARN("VideoToolbox could not create a BGRA session ({}); falling back to NV12",
+                 static_cast<int>(status));
+    mHardwareTextureFormat = HardwarePixelBuffer::TextureFormat::kNv12;
+    mHardwarePixelFormat = PixelFormat::kFormatNV12;
+    {
+      std::lock_guard<std::mutex> lock(mFormatMutex);
+      rebuildOutputFormatLocked();
+    }
+    createSession(mHardwareTextureFormat, &status);
+  }
   if (decoderSpecification != nullptr) {
     CFRelease(decoderSpecification);
   }
-  CFRelease(imageBufferAttributes);
   if (status != noErr || mSession == nullptr) {
     const auto failed = darwin::logStatus(status,
       "the video decompression session could not be created", format->toString());
@@ -278,7 +325,7 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
 
 void DarwinVideoDecoder::rebuildOutputFormatLocked() {
   auto format = MediaFormat::CreateVideoFormat(MimeTypes::VIDEO_RAW, mWidth, mHeight);
-  format->setPixelFormat(PixelFormat::kFormatNV12);
+  format->setPixelFormat(mHardwarePixelFormat);
   format->setColorInfo(mOutputColorInfo);
   if (mFrameRate > 0) {
     format->setFrameRate(mFrameRate);
@@ -326,6 +373,8 @@ void DarwinVideoDecoder::release() {
     mOutputColorInfo = ColorInfo();
   }
   mHardwareSurface.reset();
+  mHardwareTextureFormat = HardwarePixelBuffer::TextureFormat::kNv12;
+  mHardwarePixelFormat = PixelFormat::kFormatNV12;
   mInputDequeued = false;
   mInputEndOfStream = true;
   mOutputEndOfStream = true;
@@ -553,16 +602,21 @@ std::shared_ptr<AVPixelBuffer> DarwinVideoDecoder::createHardwareFrameBuffer(
   if (width <= 0 || height <= 0) {
     return nullptr;
   }
-  if (!isBiPlanar420(pixelBuffer)) {
-    // The buffer would be handed out as NV12 while it holds something else, which a consumer would
-    // sample as garbage rather than fail on.
-    MINILOG_ERROR("the decoded frame is not the bi-planar 4:2:0 the decoder asked for, "
-                  "the pixel format is {}", static_cast<unsigned>(
-                    CVPixelBufferGetPixelFormatType(pixelBuffer)));
+  const bool matchesRequestedLayout =
+    mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kRgba
+      ? isBgra8(pixelBuffer)
+      : isBiPlanar420(pixelBuffer);
+  if (!matchesRequestedLayout) {
+    // The buffer would be handed out with a format it does not hold, which a consumer would sample
+    // as garbage rather than fail on.
+    MINILOG_ERROR("the decoded frame does not have the {} layout the decoder asked for, "
+                  "the pixel format is {}",
+      mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kRgba ? "BGRA" : "NV12",
+      static_cast<unsigned>(CVPixelBufferGetPixelFormatType(pixelBuffer)));
     return nullptr;
   }
   auto frame = std::make_shared<DarwinHardwarePixelBuffer>(this, pixelBuffer, width, height,
-    HardwarePixelBuffer::TextureFormat::kNv12);
+    mHardwareTextureFormat);
   frame->timeUs(timeUs);
   return frame;
 }
