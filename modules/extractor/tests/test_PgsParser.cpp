@@ -628,6 +628,67 @@ TEST(AVPgsParserTest, ReusesThePreviousObjectsForAPaletteOnlyUpdate) {
   EXPECT_GT(second.bitmap.pixels[2], 200);
 }
 
+TEST(AVPgsParserTest, BlendsOverlappingAlphaObjectsInPcsOrder) {
+  std::vector<uint8_t> stream;
+  std::vector<uint8_t> pcs;
+  appendU16(pcs, 2);
+  appendU16(pcs, 2);
+  pcs.push_back(0x10);
+  appendU16(pcs, 0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(2);
+  for (const uint16_t id: {1, 2}) {
+    appendU16(pcs, id);
+    pcs.push_back(0);
+    pcs.push_back(0);
+    appendU16(pcs, 0);
+    appendU16(pcs, 0);
+  }
+  appendSegment(stream, 0x16, pcs);
+  std::vector<uint8_t> wds{1, 0};
+  appendU16(wds, 0);
+  appendU16(wds, 0);
+  appendU16(wds, 2);
+  appendU16(wds, 2);
+  appendSegment(stream, 0x17, wds);
+  std::vector<uint8_t> pds{0, 1};
+  pds.insert(pds.end(), {0, 16, 128, 128, 0});
+  pds.insert(pds.end(), {1, 76, 255, 85, 128});   // red, 50% alpha
+  pds.insert(pds.end(), {2, 41, 110, 240, 128});  // blue, 50% alpha
+  appendSegment(stream, 0x14, pds);
+  for (const uint8_t color: {1, 2}) {
+    std::vector<uint8_t> ods;
+    appendU16(ods, color);
+    ods.push_back(0);
+    ods.push_back(0);
+    ods.insert(ods.end(), {0, 0, 2});
+    appendU16(ods, 2);
+    appendU16(ods, 2);
+    ods.push_back(4);
+    ods.push_back(color);
+    appendSegment(stream, 0x15, ods);
+  }
+  appendSegment(stream, 0x80, {});
+
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(1u, results.size());
+  const auto& cue = results[0].cues[0];
+  ASSERT_EQ(16u, cue.bitmap.pixels.size());
+  EXPECT_GE(cue.bitmap.pixels[0], 80);
+  EXPECT_LE(cue.bitmap.pixels[0], 110);
+  EXPECT_LE(cue.bitmap.pixels[1], 25);
+  EXPECT_GE(cue.bitmap.pixels[2], 145);
+  EXPECT_LE(cue.bitmap.pixels[2], 175);
+  EXPECT_GE(cue.bitmap.pixels[3], 180);
+  EXPECT_LE(cue.bitmap.pixels[3], 205);
+}
+
 } // namespace
 
 TEST(AVPgsParserTest, ParsesASmallDisplaySetIntoABitmap) {

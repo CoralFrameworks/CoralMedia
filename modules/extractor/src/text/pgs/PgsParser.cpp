@@ -454,9 +454,33 @@ private:
             (static_cast<size_t>(render.sourceY + y) * render.source->width +
               static_cast<size_t>(render.sourceX + x)) * 4;
           const size_t targetOffset = (static_cast<size_t>(targetY) * width + targetX) * 4;
-          for (size_t i = 0; i < 4; ++i) {
-            cue.bitmap.pixels[targetOffset + i] = render.rgba[sourceOffset + i];
+          const uint8_t sourceAlpha = render.rgba[sourceOffset + 3];
+          if (sourceAlpha == 0) {
+            continue;
           }
+          if (sourceAlpha == 255) {
+            for (size_t i = 0; i < 4; ++i) {
+              cue.bitmap.pixels[targetOffset + i] = render.rgba[sourceOffset + i];
+            }
+            continue;
+          }
+          // The cue bitmap is unpremultiplied RGBA. Composite the next PGS object over the pixels
+          // already written by earlier objects, preserving the PCS order.
+          const uint8_t destinationAlpha = cue.bitmap.pixels[targetOffset + 3];
+          const uint32_t outAlpha = sourceAlpha +
+            (static_cast<uint32_t>(destinationAlpha) * (255u - sourceAlpha) + 127u) / 255u;
+          if (outAlpha == 0) {
+            continue;
+          }
+          for (size_t channel = 0; channel < 3; ++channel) {
+            const uint64_t numerator =
+              static_cast<uint64_t>(render.rgba[sourceOffset + channel]) * sourceAlpha * 255u +
+              static_cast<uint64_t>(cue.bitmap.pixels[targetOffset + channel]) *
+                destinationAlpha * (255u - sourceAlpha);
+            cue.bitmap.pixels[targetOffset + channel] =
+              static_cast<uint8_t>(numerator / (outAlpha * 255u));
+          }
+          cue.bitmap.pixels[targetOffset + 3] = static_cast<uint8_t>(outAlpha);
         }
       }
     }
