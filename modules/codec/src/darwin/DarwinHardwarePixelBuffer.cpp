@@ -50,6 +50,9 @@ PixelFormat DarwinHardwarePixelBuffer::getFormat() const {
     case TextureFormat::kNv12:
       return PixelFormat::kFormatNV12;
     case TextureFormat::kRgba:
+      return PixelFormat::kFormatBGRA;
+    case TextureFormat::kP010:
+      return PixelFormat::kFormatP010;
     default:
       return PixelFormat::kFormatBGRA;
   }

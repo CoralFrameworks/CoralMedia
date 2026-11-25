@@ -70,6 +70,8 @@ public:
     kNv12,
     /** `R8G8B8A8_UNORM`. */
     kRgba,
+    /** 10-bit bi-planar 4:2:0: `R16_UNORM` luma and `R16G16_UNORM` chroma. */
+    kP010,
   };
 
   /**

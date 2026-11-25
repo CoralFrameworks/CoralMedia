@@ -222,6 +222,9 @@ const char* convertToText<PixelFormat>(const PixelFormat format) {
     case PixelFormat::kFormatGray: {
       return "gray";
     }
+    case PixelFormat::kFormatP010: {
+      return "p010";
+    }
     default: {
       return "unknown";
     }

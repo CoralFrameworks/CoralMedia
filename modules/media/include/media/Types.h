@@ -332,6 +332,8 @@ enum class PixelFormat : int8_t {
   kFormatBGRA = 4,
   //!< A type constant for a single channel plane, i.e. the Y, U or V plane of a YUV frame on the GPU.
   kFormatGray = 5,
+  //!< A type constant for 10-bit bi-planar 4:2:0 (P010), the HDR10/HLG decoder output.
+  kFormatP010 = 6,
 };
 
 /**

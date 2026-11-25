@@ -96,7 +96,9 @@ CFMutableDictionaryRef createDestinationImageBufferAttributes(
   const auto pixelFormat = static_cast<int32_t>(
     hardwareFormat == HardwarePixelBuffer::TextureFormat::kRgba
       ? kCVPixelFormatType_32BGRA
-      : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
+      : hardwareFormat == HardwarePixelBuffer::TextureFormat::kP010
+        ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
+        : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange);
   auto formatNumber = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &pixelFormat);
   if (formatNumber != nullptr) {
     CFDictionarySetValue(attributes, kCVPixelBufferPixelFormatTypeKey, formatNumber);
@@ -166,7 +168,9 @@ void logHardwareAcceleration(VTDecompressionSessionRef session) {
 bool isBiPlanar420(CVPixelBufferRef pixelBuffer) {
   const auto format = CVPixelBufferGetPixelFormatType(pixelBuffer);
   return format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
-         format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
+         format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+         format == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+         format == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange;
 }
 
 /** Whether the pixel buffer holds the packed BGRA the session was asked for. */
@@ -235,7 +239,16 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
   mHardwarePixelFormat = PixelFormat::kFormatNV12;
   if (mHardwareSurface != nullptr) {
     const auto requested = format->getProcessFormat();
-    if (requested == PixelFormat::kFormatBGRA) {
+    const auto color = format->getColorInfo();
+    const bool hdr = color.colorSpace == ColorInfo::SpaceType::kSpaceBT2020 &&
+      (color.colorTransfer == ColorInfo::TransferType::kTransferST2084 ||
+       color.colorTransfer == ColorInfo::TransferType::kTransferHLG);
+    if (requested == PixelFormat::kFormatP010 || (hdr && requested != PixelFormat::kFormatBGRA)) {
+      // 10-bit YUV is the decoder layout that preserves HDR10/HLG precision. A BGRA request still
+      // wins because a consumer that explicitly asked for packed RGB wants one texture.
+      mHardwareTextureFormat = HardwarePixelBuffer::TextureFormat::kP010;
+      mHardwarePixelFormat = PixelFormat::kFormatP010;
+    } else if (requested == PixelFormat::kFormatBGRA) {
       mHardwareTextureFormat = HardwarePixelBuffer::TextureFormat::kRgba;
       mHardwarePixelFormat = PixelFormat::kFormatBGRA;
     } else if (requested != PixelFormat::kFormatInvalid &&
@@ -279,10 +292,11 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
   OSStatus status = noErr;
   createSession(mHardwareTextureFormat, &status);
   if ((status != noErr || mSession == nullptr) &&
-      mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kRgba) {
+      (mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kRgba ||
+       mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kP010)) {
     // Some VideoToolbox decoders cannot deliver 32BGRA. Keep the session usable by falling back to
     // the platform layout; the consumer can then convert the frame itself.
-    MINILOG_WARN("VideoToolbox could not create a BGRA session ({}); falling back to NV12",
+    MINILOG_WARN("VideoToolbox could not create the requested session ({}); falling back to NV12",
                  static_cast<int>(status));
     mHardwareTextureFormat = HardwarePixelBuffer::TextureFormat::kNv12;
     mHardwarePixelFormat = PixelFormat::kFormatNV12;
@@ -666,7 +680,8 @@ std::shared_ptr<AVPixelBuffer> DarwinVideoDecoder::createHardwareFrameBuffer(
     // as garbage rather than fail on.
     MINILOG_ERROR("the decoded frame does not have the {} layout the decoder asked for, "
                   "the pixel format is {}",
-      mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kRgba ? "BGRA" : "NV12",
+      mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kRgba ? "BGRA" :
+        mHardwareTextureFormat == HardwarePixelBuffer::TextureFormat::kP010 ? "P010" : "NV12",
       static_cast<unsigned>(CVPixelBufferGetPixelFormatType(pixelBuffer)));
     return nullptr;
   }
