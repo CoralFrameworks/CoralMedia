@@ -245,6 +245,10 @@ private:
     std::string codecs;
     /** Whether the track is a subtitle track. */
     bool isSubtitle;
+    /** The {@code Language} element (ISO 639-2) of the track, or empty. */
+    std::string language;
+    /** The {@code LanguageIETF} element (BCP 47) of the track, or empty. */
+    std::string languageIetf;
     /** The {@code FlagDefault} element: whether the track is selected when the user did not choose. */
     bool flagDefault = true;
     /** The {@code FlagForced} element: whether the subtitles must be shown. */

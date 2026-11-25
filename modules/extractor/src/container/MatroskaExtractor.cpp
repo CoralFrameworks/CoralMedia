@@ -1384,9 +1384,26 @@ bool AVMatroskaExtractor::parseTrackEntry() {
       parseAudio(track.audio);
       continue;
     }
-    if (id == kName || id == kLanguage || id == kLanguageIetf) {
-      // The name and the language of the track are not reported by this module.
+    if (id == kName) {
+      // The track name is not part of the format this module publishes; skip its bytes.
       element_.skipBytes(childSize);
+      continue;
+    }
+    if (id == kLanguage || id == kLanguageIetf) {
+      std::vector<uint8_t> value;
+      element_.readBytes(value, childSize);
+      std::string language(reinterpret_cast<const char*>(value.data()), value.size());
+      // A Matroska language is a NUL-terminated string in some muxers and a plain string in
+      // others; trim the terminator so the format carries a clean BCP 47/ISO 639 tag.
+      const auto terminator = language.find('\0');
+      if (terminator != std::string::npos) {
+        language.resize(terminator);
+      }
+      if (id == kLanguageIetf) {
+        track.languageIetf = std::move(language);
+      } else {
+        track.language = std::move(language);
+      }
       continue;
     }
     std::vector<uint8_t> value;
@@ -1807,6 +1824,11 @@ std::shared_ptr<MediaFormat> AVMatroskaExtractor::buildFormat(const Track& track
                                             Definitions::DEFAULT_CHANNEL_COUNT);
   }
 
+  const std::string& trackLanguage =
+    !track.languageIetf.empty() ? track.languageIetf : track.language;
+  if (!trackLanguage.empty() && trackLanguage != "und") {
+    format->setLanguage(trackLanguage);
+  }
   format->setContainerMimeType(MimeTypes::VIDEO_MATROSKA);
   format->setTrackId(track.id);
   format->setCodecs(track.codecs);
