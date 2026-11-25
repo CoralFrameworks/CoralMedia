@@ -161,6 +161,7 @@ public:
     windows_.clear();
     composition_ = Composition{};
     lastCompositionObjects_.clear();
+    lastWindows_.clear();
     compositionPtsUs_ = Definitions::kTimeUnset;
   }
 
@@ -311,7 +312,11 @@ private:
     // A palette-only display set has no object records: it redraws the objects of the previous
     // composition with the updated palette. A zero-object set without the flag is a clear.
     if (objectCount == 0 && (paletteUpdateFlag & 0x80) != 0) {
+      // A palette-only set has no object records and usually no WDS either; reuse both the object
+      // list and the windows of the previous composition so cropped/positioned objects redraw in
+      // the same place.
       composition_.objects = lastCompositionObjects_;
+      windows_ = lastWindows_;
     }
     size_t position = 11;
     for (uint8_t i = 0; i < objectCount && position + 8 <= size; ++i) {
@@ -490,6 +495,7 @@ private:
     result.cues.push_back(std::move(cue));
     results.push_back(std::move(result));
     lastCompositionObjects_ = composition_.objects;
+    lastWindows_ = windows_;
     resetComposition();
   }
 
@@ -515,6 +521,7 @@ private:
   std::map<uint8_t, Window> windows_;
   Composition composition_;
   std::vector<CompositionObject> lastCompositionObjects_;
+  std::map<uint8_t, Window> lastWindows_;
   int64_t compositionPtsUs_ = Definitions::kTimeUnset;
 };
 
