@@ -22,6 +22,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -687,6 +688,84 @@ TEST(AVPgsParserTest, BlendsOverlappingAlphaObjectsInPcsOrder) {
   EXPECT_LE(cue.bitmap.pixels[2], 175);
   EXPECT_GE(cue.bitmap.pixels[3], 180);
   EXPECT_LE(cue.bitmap.pixels[3], 205);
+}
+
+TEST(AVPgsParserTest, RandomMixedDisplaySetsStayWellFormed) {
+  std::mt19937 random(0xC0FFEEu);
+  auto next = [&](const uint32_t bound) { return static_cast<uint32_t>(random() % bound); };
+  for (int iteration = 0; iteration < 64; ++iteration) {
+    const uint8_t paletteId = static_cast<uint8_t>(next(4));
+    const int objectCount = 1 + static_cast<int>(next(4));
+    std::vector<uint8_t> stream;
+    std::vector<uint8_t> pcs;
+    appendU16(pcs, 8);
+    appendU16(pcs, 8);
+    pcs.push_back(0x10);
+    appendU16(pcs, static_cast<uint16_t>(iteration));
+    pcs.push_back(0);
+    pcs.push_back(0);
+    pcs.push_back(paletteId);
+    pcs.push_back(static_cast<uint8_t>(objectCount));
+    std::vector<uint8_t> wds;
+    wds.push_back(static_cast<uint8_t>(objectCount));
+    for (int i = 0; i < objectCount; ++i) {
+      const int x = static_cast<int>(next(6));
+      const int y = static_cast<int>(next(6));
+      const int width = 2 + static_cast<int>(next(3));
+      const int height = 2 + static_cast<int>(next(3));
+      appendU16(pcs, static_cast<uint16_t>(i + 1));
+      pcs.push_back(static_cast<uint8_t>(i + 1));
+      pcs.push_back(0x80);
+      appendU16(pcs, 0);
+      appendU16(pcs, 0);
+      appendU16(pcs, static_cast<uint16_t>(next(3)));
+      appendU16(pcs, static_cast<uint16_t>(next(3)));
+      appendU16(pcs, 2);
+      appendU16(pcs, 2);
+      wds.push_back(static_cast<uint8_t>(i + 1));
+      appendU16(wds, static_cast<uint16_t>(x));
+      appendU16(wds, static_cast<uint16_t>(y));
+      appendU16(wds, static_cast<uint16_t>(width));
+      appendU16(wds, static_cast<uint16_t>(height));
+    }
+    appendSegment(stream, 0x16, pcs);
+    appendSegment(stream, 0x17, wds);
+    std::vector<uint8_t> pds{paletteId, 1};
+    pds.insert(pds.end(), {0, 16, 128, 128, 0});
+    for (int i = 1; i <= objectCount; ++i) {
+      pds.push_back(static_cast<uint8_t>(i));
+      pds.push_back(static_cast<uint8_t>(next(256)));
+      pds.push_back(static_cast<uint8_t>(next(256)));
+      pds.push_back(static_cast<uint8_t>(next(256)));
+      pds.push_back(static_cast<uint8_t>(next(256)));
+    }
+    appendSegment(stream, 0x14, pds);
+    for (int i = 1; i <= objectCount; ++i) {
+      std::vector<uint8_t> ods;
+      appendU16(ods, static_cast<uint16_t>(i));
+      ods.push_back(0);
+      ods.push_back(0);
+      ods.insert(ods.end(), {0, 0, 2});
+      appendU16(ods, 4);
+      appendU16(ods, 4);
+      ods.push_back(0x10);
+      ods.push_back(static_cast<uint8_t>(i));
+      appendSegment(stream, 0x15, ods);
+    }
+    appendSegment(stream, 0x80, {});
+
+    AVPgsParser parser;
+    std::vector<AVCuesWithTiming> results;
+    ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+      AVSubtitleParser::OutputOptions::allCues(),
+      [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+    ASSERT_EQ(1u, results.size());
+    ASSERT_EQ(1u, results[0].cues.size());
+    const auto& bitmap = results[0].cues[0].bitmap;
+    EXPECT_GT(bitmap.width, 0);
+    EXPECT_GT(bitmap.height, 0);
+    EXPECT_EQ(static_cast<size_t>(bitmap.width) * bitmap.height * 4, bitmap.pixels.size());
+  }
 }
 
 } // namespace
