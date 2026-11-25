@@ -238,7 +238,8 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
     if (requested == PixelFormat::kFormatBGRA) {
       mHardwareTextureFormat = HardwarePixelBuffer::TextureFormat::kRgba;
       mHardwarePixelFormat = PixelFormat::kFormatBGRA;
-    } else if (requested != PixelFormat::kFormatInvalid) {
+    } else if (requested != PixelFormat::kFormatInvalid &&
+               requested != PixelFormat::kFormatNV12) {
       MINILOG_DEBUG("the Darwin decoder ignores the requested process format {}; "
                     "hardware frames stay NV12", static_cast<int>(requested));
     }
