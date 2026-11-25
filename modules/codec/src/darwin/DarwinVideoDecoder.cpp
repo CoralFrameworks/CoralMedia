@@ -178,6 +178,88 @@ bool isBgra8(CVPixelBufferRef pixelBuffer) {
   return CVPixelBufferGetPixelFormatType(pixelBuffer) == kCVPixelFormatType_32BGRA;
 }
 
+bool sameString(CFTypeRef value, CFStringRef expected) {
+  return value != nullptr && CFGetTypeID(value) == CFStringGetTypeID() &&
+    CFStringCompare(static_cast<CFStringRef>(value), expected, 0) == kCFCompareEqualTo;
+}
+
+/**
+ * Reads the colour description the codec put in the format description.
+ *
+ * <p>A container may omit its colour box even when the bitstream carries the same information in the
+ * VUI. VideoToolbox exposes those VUI values as format-description extensions, so a decoder can
+ * report HDR even when the extractor's container-level ColorInfo is empty.
+ */
+ColorInfo colorInfoFromFormatDescription(CMFormatDescriptionRef description) {
+  ColorInfo color;
+  if (description == nullptr) {
+    return color;
+  }
+  const auto extensions = CMFormatDescriptionGetExtensions(description);
+  if (extensions == nullptr) {
+    return color;
+  }
+  const auto primaries = CFDictionaryGetValue(extensions,
+    kCMFormatDescriptionExtension_ColorPrimaries);
+  if (sameString(primaries, kCMFormatDescriptionColorPrimaries_ITU_R_2020)) {
+    color.colorSpace = ColorInfo::SpaceType::kSpaceBT2020;
+  } else if (sameString(primaries, kCMFormatDescriptionColorPrimaries_ITU_R_709_2)) {
+    color.colorSpace = ColorInfo::SpaceType::kSpaceBT709;
+  } else if (sameString(primaries, kCMFormatDescriptionColorPrimaries_EBU_3213) ||
+             sameString(primaries, kCMFormatDescriptionColorPrimaries_SMPTE_C)) {
+    color.colorSpace = ColorInfo::SpaceType::kSpaceBT601;
+  }
+
+  const auto transfer = CFDictionaryGetValue(extensions,
+    kCMFormatDescriptionExtension_TransferFunction);
+  if (sameString(transfer, kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ)) {
+    color.colorTransfer = ColorInfo::TransferType::kTransferST2084;
+  } else if (sameString(transfer, kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG)) {
+    color.colorTransfer = ColorInfo::TransferType::kTransferHLG;
+  } else if (sameString(transfer, kCMFormatDescriptionTransferFunction_Linear)) {
+    color.colorTransfer = ColorInfo::TransferType::kTransferLinear;
+  } else if (sameString(transfer, kCMFormatDescriptionTransferFunction_sRGB)) {
+    color.colorTransfer = ColorInfo::TransferType::kTransferSRGB;
+  } else if (transfer != nullptr) {
+    color.colorTransfer = ColorInfo::TransferType::kTransferSDR;
+  }
+
+  const auto matrix = CFDictionaryGetValue(extensions,
+    kCMFormatDescriptionExtension_YCbCrMatrix);
+  if (color.colorSpace == ColorInfo::SpaceType::kSpaceUnknown) {
+    if (sameString(matrix, kCMFormatDescriptionYCbCrMatrix_ITU_R_2020)) {
+      color.colorSpace = ColorInfo::SpaceType::kSpaceBT2020;
+    } else if (sameString(matrix, kCMFormatDescriptionYCbCrMatrix_ITU_R_709_2)) {
+      color.colorSpace = ColorInfo::SpaceType::kSpaceBT709;
+    } else if (sameString(matrix, kCMFormatDescriptionYCbCrMatrix_ITU_R_601_4)) {
+      color.colorSpace = ColorInfo::SpaceType::kSpaceBT601;
+    }
+  }
+
+  const auto fullRange = CFDictionaryGetValue(extensions,
+    kCMFormatDescriptionExtension_FullRangeVideo);
+  if (fullRange != nullptr && CFGetTypeID(fullRange) == CFBooleanGetTypeID()) {
+    color.colorRange = CFBooleanGetValue(static_cast<CFBooleanRef>(fullRange))
+      ? ColorInfo::RangeType::kRangeFull
+      : ColorInfo::RangeType::kRangeLimited;
+  }
+  return color;
+}
+
+ColorInfo mergeColorInfo(const ColorInfo& container, const ColorInfo& codec) {
+  ColorInfo merged = container;
+  if (merged.colorSpace == ColorInfo::SpaceType::kSpaceUnknown) {
+    merged.colorSpace = codec.colorSpace;
+  }
+  if (merged.colorTransfer == ColorInfo::TransferType::kTransferUnknown) {
+    merged.colorTransfer = codec.colorTransfer;
+  }
+  if (merged.colorRange == ColorInfo::RangeType::kRangeUnknown) {
+    merged.colorRange = codec.colorRange;
+  }
+  return merged;
+}
+
 } // namespace
 
 DarwinVideoDecoder::DarwinVideoDecoder() = default;
@@ -219,6 +301,11 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
     return false;
   }
 
+  // The container's colour box wins; the codec VUI fills whatever the container left unknown. The
+  // latter is common for an HDR10 stream in an SDR container.
+  const ColorInfo effectiveColor = mergeColorInfo(
+    format->getColorInfo(), colorInfoFromFormatDescription(mFormatDescription));
+
   // The format description carries the coded size of the parameter sets, which is the size a stream
   // without a container header is described by.
   const auto dimensions = CMVideoFormatDescriptionGetDimensions(mFormatDescription);
@@ -239,7 +326,7 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
   mHardwarePixelFormat = PixelFormat::kFormatNV12;
   if (mHardwareSurface != nullptr) {
     const auto requested = format->getProcessFormat();
-    const auto color = format->getColorInfo();
+    const auto color = effectiveColor;
     const bool hdr = color.colorSpace == ColorInfo::SpaceType::kSpaceBT2020 &&
       (color.colorTransfer == ColorInfo::TransferType::kTransferST2084 ||
        color.colorTransfer == ColorInfo::TransferType::kTransferHLG);
@@ -266,7 +353,7 @@ bool DarwinVideoDecoder::configure(const std::shared_ptr<MediaFormat>& format,
     mWidth = width;
     mHeight = height;
     mFrameRate = format->getFrameRate() > 0 ? format->getFrameRate() : 0;
-    mOutputColorInfo = format->getColorInfo();
+    mOutputColorInfo = effectiveColor;
     rebuildOutputFormatLocked();
   }
 
