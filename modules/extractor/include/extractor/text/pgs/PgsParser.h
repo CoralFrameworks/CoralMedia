@@ -33,7 +33,8 @@ namespace coral {
  *
  * <p>Window definitions clip composition objects, a PCS cropping rectangle selects the visible
  * part of an object, and a PDS that arrives after an ODS is applied when the display set is
- * composed. Object decoding is therefore deferred until composition time.
+ * composed. An ODS may also be split across first/last segments, and a later ODS version replaces
+ * the object with the same id. Object decoding is therefore deferred until composition time.
  */
 class AVPgsParser final : public AVSubtitleParser {
 public:

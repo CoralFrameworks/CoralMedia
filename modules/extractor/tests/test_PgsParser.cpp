@@ -330,6 +330,121 @@ TEST(AVPgsParserTest, AppliesAPaletteUpdateAfterTheObject) {
   EXPECT_EQ(255, cue.bitmap.pixels[3]);
 }
 
+std::vector<uint8_t> makeSegmentedOdsDisplaySet() {
+  std::vector<uint8_t> stream;
+  std::vector<uint8_t> pcs;
+  appendU16(pcs, 2);
+  appendU16(pcs, 2);
+  pcs.push_back(0x10);
+  appendU16(pcs, 0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(1);
+  appendU16(pcs, 1);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  appendU16(pcs, 0);
+  appendU16(pcs, 0);
+  appendSegment(stream, 0x16, pcs);
+
+  std::vector<uint8_t> pds{0, 0};
+  pds.insert(pds.end(), {0, 16, 128, 128, 0});
+  pds.insert(pds.end(), {1, 76, 255, 85, 255});
+  appendSegment(stream, 0x14, pds);
+
+  auto ods = [](const uint8_t flags, const uint8_t chunk) {
+    std::vector<uint8_t> payload;
+    appendU16(payload, 1);
+    payload.push_back(0);      // version
+    payload.push_back(flags);  // first (0x80) / last (0x40)
+    payload.insert(payload.end(), {0, 0, 1}); // data length
+    appendU16(payload, 2);
+    appendU16(payload, 2);
+    payload.push_back(chunk);
+    return payload;
+  };
+  appendSegment(stream, 0x15, ods(0x80, 4));
+  appendSegment(stream, 0x15, ods(0x40, 1));
+  appendSegment(stream, 0x80, {});
+  return stream;
+}
+
+std::vector<uint8_t> makeObjectUpdateDisplaySet() {
+  std::vector<uint8_t> stream;
+  std::vector<uint8_t> pcs;
+  appendU16(pcs, 2);
+  appendU16(pcs, 2);
+  pcs.push_back(0x10);
+  appendU16(pcs, 0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(1);
+  appendU16(pcs, 1);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  appendU16(pcs, 0);
+  appendU16(pcs, 0);
+  appendSegment(stream, 0x16, pcs);
+
+  auto pds = [](const uint8_t y, const uint8_t cr, const uint8_t cb) {
+    std::vector<uint8_t> payload{0, 0};
+    payload.insert(payload.end(), {0, 16, 128, 128, 0});
+    payload.insert(payload.end(), {1, y, cr, cb, 255});
+    return payload;
+  };
+  auto ods = [](const uint8_t version) {
+    std::vector<uint8_t> payload;
+    appendU16(payload, 1);
+    payload.push_back(version);
+    payload.push_back(0);
+    payload.insert(payload.end(), {0, 0, 2});
+    appendU16(payload, 2);
+    appendU16(payload, 2);
+    payload.push_back(4);
+    payload.push_back(1);
+    return payload;
+  };
+  appendSegment(stream, 0x14, pds(76, 255, 85));       // red
+  appendSegment(stream, 0x15, ods(0));
+  appendSegment(stream, 0x14, pds(41, 110, 240));      // blue, same palette index
+  appendSegment(stream, 0x15, ods(1));                 // object version update
+  appendSegment(stream, 0x80, {});
+  return stream;
+}
+
+TEST(AVPgsParserTest, ReassemblesAnOdsSplitAcrossSegments) {
+  const auto stream = makeSegmentedOdsDisplaySet();
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(1u, results.size());
+  const auto& cue = results[0].cues[0];
+  EXPECT_EQ(2, cue.bitmap.width);
+  EXPECT_EQ(2, cue.bitmap.height);
+  ASSERT_EQ(16u, cue.bitmap.pixels.size());
+  EXPECT_EQ(255, cue.bitmap.pixels[3]);
+}
+
+TEST(AVPgsParserTest, UsesTheLatestOdsObjectVersion) {
+  const auto stream = makeObjectUpdateDisplaySet();
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(1u, results.size());
+  const auto& cue = results[0].cues[0];
+  ASSERT_EQ(16u, cue.bitmap.pixels.size());
+  // The second ODS has the same id but version 1 and the palette at that point is blue.
+  EXPECT_LT(cue.bitmap.pixels[0], 60);
+  EXPECT_LT(cue.bitmap.pixels[1], 60);
+  EXPECT_GT(cue.bitmap.pixels[2], 200);
+}
+
 } // namespace
 
 TEST(AVPgsParserTest, ParsesASmallDisplaySetIntoABitmap) {

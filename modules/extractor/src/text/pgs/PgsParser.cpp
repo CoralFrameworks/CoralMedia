@@ -63,6 +63,15 @@ struct Object final {
   std::vector<uint8_t> rle;
 };
 
+/** An object whose ODS payload is split over several ODS segments. */
+struct PartialObject final {
+  uint16_t id = 0;
+  uint8_t version = 0;
+  int width = 0;
+  int height = 0;
+  std::vector<uint8_t> rle;
+};
+
 struct CompositionObject final {
   uint16_t id = 0;
   uint8_t windowId = 0;
@@ -142,6 +151,7 @@ public:
   void reset() {
     palette_.fill(0);
     objects_.clear();
+    partialObjects_.clear();
     windows_.clear();
     composition_ = Composition{};
     compositionPtsUs_ = Definitions::kTimeUnset;
@@ -229,16 +239,53 @@ private:
   void parseOds(const uint8_t* data, const size_t size) {
     if (size < 11) return;
     const uint16_t id = readU16(data, size, 0);
-    const int width = readU16(data, size, 7);
-    const int height = readU16(data, size, 9);
+    const uint8_t version = data[2];
+    const uint8_t flags = data[3];
     const size_t dataSize = (static_cast<size_t>(data[4]) << 16) |
                             (static_cast<size_t>(data[5]) << 8) | data[6];
     if (dataSize > size - 11) return;
-    Object object;
-    object.width = width;
-    object.height = height;
-    object.rle.assign(data + 11, data + 11 + dataSize);
-    objects_[id] = std::move(object);
+    const bool first = (flags & 0x80) != 0;
+    const bool last = (flags & 0x40) != 0;
+
+    if (!first && !last) {
+      // A complete object in one segment, as most muxers produce.
+      Object object;
+      object.width = readU16(data, size, 7);
+      object.height = readU16(data, size, 9);
+      object.rle.assign(data + 11, data + 11 + dataSize);
+      partialObjects_.erase(id);
+      objects_[id] = std::move(object);
+      return;
+    }
+
+    auto partial = partialObjects_.find(id);
+    if (first) {
+      PartialObject object;
+      object.id = id;
+      object.version = version;
+      object.width = readU16(data, size, 7);
+      object.height = readU16(data, size, 9);
+      object.rle.assign(data + 11, data + 11 + dataSize);
+      partialObjects_[id] = std::move(object);
+      partial = partialObjects_.find(id);
+    } else {
+      if (partial == partialObjects_.end() || partial->second.version != version) {
+        // The first segment was lost or belongs to another version; do not append garbage.
+        return;
+      }
+      partial->second.rle.insert(partial->second.rle.end(), data + 11, data + 11 + dataSize);
+    }
+
+    if (last && partial != partialObjects_.end()) {
+      Object object;
+      object.width = partial->second.width;
+      object.height = partial->second.height;
+      object.rle = std::move(partial->second.rle);
+      partialObjects_.erase(partial);
+      if (object.width > 0 && object.height > 0 && !object.rle.empty()) {
+        objects_[id] = std::move(object);
+      }
+    }
   }
 
   void parsePcs(const uint8_t* data, const size_t size, const uint32_t pts, const bool hasPts) {
@@ -417,6 +464,7 @@ private:
 
   std::array<uint32_t, 256> palette_{};
   std::map<uint16_t, Object> objects_;
+  std::map<uint16_t, PartialObject> partialObjects_;
   std::map<uint8_t, Window> windows_;
   Composition composition_;
   int64_t compositionPtsUs_ = Definitions::kTimeUnset;
