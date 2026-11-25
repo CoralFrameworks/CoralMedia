@@ -147,7 +147,16 @@ private:
 
   static constexpr int DEFAULT_MAX_INPUT_SIZE = 64 * 1024;
   static constexpr size_t MINIMUM_OUTPUT_FRAMES = 4096;
-  static constexpr size_t MAXIMUM_OUTPUT_FRAMES = 1 << 20;
+  /**
+   * The most frames one decode call may produce.
+   *
+   * It is also the cap of one output buffer, so it has to stay well below a consumer's ring: a
+   * five-second AAC track decoded into a single buffer is far more than a one-second audio sink can
+   * accept, and a sink that rejects an oversized write leaves the producer retrying forever. The
+   * value is about 341 ms at 48 kHz, which keeps the call count low without making one buffer
+   * indivisible for a streaming consumer.
+   */
+  static constexpr size_t MAXIMUM_OUTPUT_FRAMES = 16 * 1024;
   static constexpr size_t MAXIMUM_INPUT_BATCH_BYTES = 8 * 1024 * 1024;
   static constexpr UInt32 DEFAULT_INPUT_FRAMES_PER_PACKET = 1024;
 
