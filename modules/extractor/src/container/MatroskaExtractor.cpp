@@ -1385,8 +1385,14 @@ bool AVMatroskaExtractor::parseTrackEntry() {
       continue;
     }
     if (id == kName) {
-      // The track name is not part of the format this module publishes; skip its bytes.
-      element_.skipBytes(childSize);
+      std::vector<uint8_t> value;
+      element_.readBytes(value, childSize);
+      std::string name(reinterpret_cast<const char*>(value.data()), value.size());
+      const auto terminator = name.find('\0');
+      if (terminator != std::string::npos) {
+        name.resize(terminator);
+      }
+      track.name = std::move(name);
       continue;
     }
     if (id == kLanguage || id == kLanguageIetf) {
@@ -1824,6 +1830,9 @@ std::shared_ptr<MediaFormat> AVMatroskaExtractor::buildFormat(const Track& track
                                             Definitions::DEFAULT_CHANNEL_COUNT);
   }
 
+  if (!track.name.empty()) {
+    format->setLabel(track.name);
+  }
   const std::string& trackLanguage =
     !track.languageIetf.empty() ? track.languageIetf : track.language;
   if (!trackLanguage.empty() && trackLanguage != "und") {

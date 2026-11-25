@@ -245,6 +245,8 @@ private:
     std::string codecs;
     /** Whether the track is a subtitle track. */
     bool isSubtitle;
+    /** The {@code Name} element (the human readable track label), or empty. */
+    std::string name;
     /** The {@code Language} element (ISO 639-2) of the track, or empty. */
     std::string language;
     /** The {@code LanguageIETF} element (BCP 47) of the track, or empty. */
