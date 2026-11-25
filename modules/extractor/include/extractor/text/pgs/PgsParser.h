@@ -31,8 +31,9 @@ namespace coral {
  * run-length data is expanded with the palette of the current display set, and the resulting object
  * is placed at the composition position in an RGBA bitmap.
  *
- * <p>Window clipping, object cropping and palette updates are not interpreted yet; an object is
- * drawn whole at its composition position.
+ * <p>Window definitions clip composition objects, a PCS cropping rectangle selects the visible
+ * part of an object, and a PDS that arrives after an ODS is applied when the display set is
+ * composed. Object decoding is therefore deferred until composition time.
  */
 class AVPgsParser final : public AVSubtitleParser {
 public:

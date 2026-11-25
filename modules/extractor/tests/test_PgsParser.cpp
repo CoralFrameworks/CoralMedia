@@ -147,6 +147,189 @@ std::vector<uint8_t> makeWindowedDisplaySet() {
   return stream;
 }
 
+std::vector<uint8_t> makeCroppedDisplaySet() {
+  std::vector<uint8_t> stream;
+  std::vector<uint8_t> pcs;
+  appendU16(pcs, 4);
+  appendU16(pcs, 4);
+  pcs.push_back(0x10);
+  appendU16(pcs, 0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(1);
+  appendU16(pcs, 1);
+  pcs.push_back(0);
+  pcs.push_back(0x80);  // cropped object
+  appendU16(pcs, 0);
+  appendU16(pcs, 0);
+  appendU16(pcs, 1);
+  appendU16(pcs, 1);
+  appendU16(pcs, 2);
+  appendU16(pcs, 2);
+  appendSegment(stream, 0x16, pcs);
+
+  std::vector<uint8_t> pds{0, 0};
+  pds.insert(pds.end(), {0, 16, 128, 128, 0});
+  pds.insert(pds.end(), {1, 76, 255, 85, 255});
+  appendSegment(stream, 0x14, pds);
+
+  std::vector<uint8_t> ods;
+  appendU16(ods, 1);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(2);
+  appendU16(ods, 4);
+  appendU16(ods, 4);
+  ods.push_back(0x10);
+  ods.push_back(1);
+  appendSegment(stream, 0x15, ods);
+  appendSegment(stream, 0x80, {});
+  return stream;
+}
+
+std::vector<uint8_t> makeWindowClippedDisplaySet() {
+  std::vector<uint8_t> stream;
+  std::vector<uint8_t> pcs;
+  appendU16(pcs, 10);
+  appendU16(pcs, 10);
+  pcs.push_back(0x10);
+  appendU16(pcs, 0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(1);
+  appendU16(pcs, 1);
+  pcs.push_back(1);
+  pcs.push_back(0);
+  appendU16(pcs, 0);
+  appendU16(pcs, 0);
+  appendSegment(stream, 0x16, pcs);
+
+  std::vector<uint8_t> wds;
+  wds.push_back(1);
+  wds.push_back(1);
+  appendU16(wds, 4);
+  appendU16(wds, 6);
+  appendU16(wds, 2);
+  appendU16(wds, 2);
+  appendSegment(stream, 0x17, wds);
+
+  std::vector<uint8_t> pds{0, 0};
+  pds.insert(pds.end(), {0, 16, 128, 128, 0});
+  pds.insert(pds.end(), {1, 76, 255, 85, 255});
+  appendSegment(stream, 0x14, pds);
+
+  std::vector<uint8_t> ods;
+  appendU16(ods, 1);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(2);
+  appendU16(ods, 4);
+  appendU16(ods, 4);
+  ods.push_back(0x10);
+  ods.push_back(1);
+  appendSegment(stream, 0x15, ods);
+  appendSegment(stream, 0x80, {});
+  return stream;
+}
+
+std::vector<uint8_t> makePaletteUpdateDisplaySet() {
+  std::vector<uint8_t> stream;
+  std::vector<uint8_t> pcs;
+  appendU16(pcs, 2);
+  appendU16(pcs, 2);
+  pcs.push_back(0x10);
+  appendU16(pcs, 0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(1);
+  appendU16(pcs, 1);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  appendU16(pcs, 0);
+  appendU16(pcs, 0);
+  appendSegment(stream, 0x16, pcs);
+
+  std::vector<uint8_t> ods;
+  appendU16(ods, 1);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.push_back(2);
+  appendU16(ods, 2);
+  appendU16(ods, 2);
+  ods.push_back(4);
+  ods.push_back(1);
+  appendSegment(stream, 0x15, ods);
+
+  // PDS arrives after ODS. The parser must decode the object with the updated palette at
+  // composition time, not with the palette that happened to be current when ODS was parsed.
+  std::vector<uint8_t> pds{0, 0};
+  pds.insert(pds.end(), {0, 16, 128, 128, 0});
+  pds.insert(pds.end(), {1, 41, 110, 240, 255});
+  appendSegment(stream, 0x14, pds);
+  appendSegment(stream, 0x80, {});
+  return stream;
+}
+
+TEST(AVPgsParserTest, CropsACroppedObject) {
+  const auto stream = makeCroppedDisplaySet();
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(1u, results.size());
+  const auto& cue = results[0].cues[0];
+  EXPECT_EQ(2, cue.bitmap.width);
+  EXPECT_EQ(2, cue.bitmap.height);
+  ASSERT_EQ(2u * 2u * 4u, cue.bitmap.pixels.size());
+  EXPECT_EQ(255, cue.bitmap.pixels[3]);
+  EXPECT_GT(cue.bitmap.pixels[0], 100);
+}
+
+TEST(AVPgsParserTest, ClipsAnObjectToItsWindow) {
+  const auto stream = makeWindowClippedDisplaySet();
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(1u, results.size());
+  const auto& cue = results[0].cues[0];
+  EXPECT_EQ(2, cue.bitmap.width);
+  EXPECT_EQ(2, cue.bitmap.height);
+  EXPECT_FLOAT_EQ(0.4f, cue.position);
+  EXPECT_FLOAT_EQ(0.6f, cue.line);
+  EXPECT_FLOAT_EQ(0.2f, cue.size);
+  EXPECT_FLOAT_EQ(0.2f, cue.bitmapHeight);
+  ASSERT_EQ(2u * 2u * 4u, cue.bitmap.pixels.size());
+  EXPECT_EQ(255, cue.bitmap.pixels[3]);
+}
+
+TEST(AVPgsParserTest, AppliesAPaletteUpdateAfterTheObject) {
+  const auto stream = makePaletteUpdateDisplaySet();
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(1u, results.size());
+  const auto& cue = results[0].cues[0];
+  ASSERT_EQ(16u, cue.bitmap.pixels.size());
+  EXPECT_LT(cue.bitmap.pixels[0], 60);
+  EXPECT_LT(cue.bitmap.pixels[1], 60);
+  EXPECT_GT(cue.bitmap.pixels[2], 200);
+  EXPECT_EQ(255, cue.bitmap.pixels[3]);
+}
+
 } // namespace
 
 TEST(AVPgsParserTest, ParsesASmallDisplaySetIntoABitmap) {

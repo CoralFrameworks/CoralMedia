@@ -59,7 +59,8 @@ uint8_t clampByte(const float value) {
 struct Object final {
   int width = 0;
   int height = 0;
-  std::vector<uint8_t> rgba;
+  /** The RLE payload; it is decoded at composition time so a later PDS update applies to it. */
+  std::vector<uint8_t> rle;
 };
 
 struct CompositionObject final {
@@ -67,6 +68,11 @@ struct CompositionObject final {
   uint8_t windowId = 0;
   int x = 0;
   int y = 0;
+  bool cropped = false;
+  int cropX = 0;
+  int cropY = 0;
+  int cropWidth = 0;
+  int cropHeight = 0;
 };
 
 /** One window of the presentation, in plane coordinates. */
@@ -231,7 +237,7 @@ private:
     Object object;
     object.width = width;
     object.height = height;
-    if (!decodeRle(data + 11, dataSize, width, height, palette_, object.rgba)) return;
+    object.rle.assign(data + 11, data + 11 + dataSize);
     objects_[id] = std::move(object);
   }
 
@@ -250,7 +256,14 @@ private:
       object.x = readU16(data, size, position + 4);
       object.y = readU16(data, size, position + 6);
       position += 8;
-      if ((flags & 0x80) != 0) position += 8;
+      if ((flags & 0x80) != 0 && position + 8 <= size) {
+        object.cropped = true;
+        object.cropX = readU16(data, size, position);
+        object.cropY = readU16(data, size, position + 2);
+        object.cropWidth = readU16(data, size, position + 4);
+        object.cropHeight = readU16(data, size, position + 6);
+        position += 8;
+      }
       composition_.objects.push_back(object);
     }
     compositionPtsUs_ = hasPts ? ptsToUs(pts) : Definitions::kTimeUnset;
@@ -261,27 +274,70 @@ private:
       resetComposition();
       return;
     }
+    struct RenderObject {
+      const CompositionObject* composition;
+      const Object* source;
+      std::vector<uint8_t> rgba;
+      int sourceX;
+      int sourceY;
+      int width;
+      int height;
+    };
+    std::vector<RenderObject> renderObjects;
     int minX = std::numeric_limits<int>::max();
     int minY = std::numeric_limits<int>::max();
     int maxX = std::numeric_limits<int>::min();
     int maxY = std::numeric_limits<int>::min();
-    for (const auto& object: composition_.objects) {
+    for (const auto& object : composition_.objects) {
       const auto found = objects_.find(object.id);
       if (found == objects_.end()) continue;
+      Object& source = found->second;
+      if (source.width <= 0 || source.height <= 0 || source.rle.empty()) continue;
+      int sourceX = 0;
+      int sourceY = 0;
+      int width = source.width;
+      int height = source.height;
+      if (object.cropped) {
+        sourceX = object.cropX;
+        sourceY = object.cropY;
+        width = object.cropWidth;
+        height = object.cropHeight;
+      }
+      if (width <= 0 || height <= 0 || sourceX + width > source.width ||
+          sourceY + height > source.height) {
+        continue;
+      }
+      RenderObject render;
+      render.composition = &object;
+      render.source = &source;
+      render.sourceX = sourceX;
+      render.sourceY = sourceY;
+      render.width = width;
+      render.height = height;
+      if (!decodeRle(source.rle.data(), source.rle.size(), source.width, source.height, palette_,
+            render.rgba)) {
+        continue;
+      }
       const int originX = objectOriginX(object);
       const int originY = objectOriginY(object);
-      minX = std::min(minX, originX);
-      minY = std::min(minY, originY);
-      maxX = std::max(maxX, originX + found->second.width);
-      maxY = std::max(maxY, originY + found->second.height);
+      // A window defines the cue's extent even when the objects in it are smaller; the pixels
+      // outside the objects stay transparent. The drawing loop still clips each object to the
+      // window rectangle.
       if (const auto window = windows_.find(object.windowId); window != windows_.end()) {
         minX = std::min(minX, window->second.x);
         minY = std::min(minY, window->second.y);
         maxX = std::max(maxX, window->second.x + window->second.width);
         maxY = std::max(maxY, window->second.y + window->second.height);
+      } else {
+        minX = std::min(minX, originX);
+        minY = std::min(minY, originY);
+        maxX = std::max(maxX, originX + width);
+        maxY = std::max(maxY, originY + height);
       }
+      renderObjects.push_back(std::move(render));
     }
-    if (minX == std::numeric_limits<int>::max() || maxX <= minX || maxY <= minY) {
+    if (renderObjects.empty() || minX == std::numeric_limits<int>::max() || maxX <= minX ||
+        maxY <= minY) {
       resetComposition();
       return;
     }
@@ -305,22 +361,32 @@ private:
       cue.lineAnchor = AVCue::AnchorType::kStart;
       cue.lineType = AVCue::LineType::kFraction;
     }
-    for (const auto& object: composition_.objects) {
-      const auto found = objects_.find(object.id);
-      if (found == objects_.end()) continue;
-      const Object& source = found->second;
-      const int originX = objectOriginX(object) - minX;
-      const int originY = objectOriginY(object) - minY;
-      for (int y = 0; y < source.height; ++y) {
-        const int targetY = originY + y;
-        if (targetY < 0 || targetY >= height) continue;
-        for (int x = 0; x < source.width; ++x) {
-          const int targetX = originX + x;
-          if (targetX < 0 || targetX >= width) continue;
-          const size_t sourceOffset = (static_cast<size_t>(y) * source.width + x) * 4;
+    for (const auto& render : renderObjects) {
+      const auto& object = *render.composition;
+      const int originX = objectOriginX(object);
+      const int originY = objectOriginY(object);
+      const auto window = windows_.find(object.windowId);
+      for (int y = 0; y < render.height; ++y) {
+        const int globalY = originY + y;
+        if (window != windows_.end() &&
+            (globalY < window->second.y || globalY >= window->second.y + window->second.height)) {
+          continue;
+        }
+        for (int x = 0; x < render.width; ++x) {
+          const int globalX = originX + x;
+          if (window != windows_.end() &&
+              (globalX < window->second.x || globalX >= window->second.x + window->second.width)) {
+            continue;
+          }
+          const int targetX = globalX - minX;
+          const int targetY = globalY - minY;
+          if (targetX < 0 || targetX >= width || targetY < 0 || targetY >= height) continue;
+          const size_t sourceOffset =
+            (static_cast<size_t>(render.sourceY + y) * render.source->width +
+              static_cast<size_t>(render.sourceX + x)) * 4;
           const size_t targetOffset = (static_cast<size_t>(targetY) * width + targetX) * 4;
           for (size_t i = 0; i < 4; ++i) {
-            cue.bitmap.pixels[targetOffset + i] = source.rgba[sourceOffset + i];
+            cue.bitmap.pixels[targetOffset + i] = render.rgba[sourceOffset + i];
           }
         }
       }
