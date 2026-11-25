@@ -445,6 +445,121 @@ TEST(AVPgsParserTest, UsesTheLatestOdsObjectVersion) {
   EXPECT_GT(cue.bitmap.pixels[2], 200);
 }
 
+std::vector<uint8_t> makePaletteIdDisplaySet() {
+  std::vector<uint8_t> stream;
+  std::vector<uint8_t> pcs;
+  appendU16(pcs, 2);
+  appendU16(pcs, 2);
+  pcs.push_back(0x10);
+  appendU16(pcs, 0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(1);  // palette id 1
+  pcs.push_back(1);
+  appendU16(pcs, 1);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  appendU16(pcs, 0);
+  appendU16(pcs, 0);
+  appendSegment(stream, 0x16, pcs);
+
+  auto pds = [](const uint8_t id, const uint8_t version, const uint8_t y, const uint8_t cr,
+                const uint8_t cb) {
+    std::vector<uint8_t> payload{id, version};
+    payload.insert(payload.end(), {0, 16, 128, 128, 0});
+    payload.insert(payload.end(), {1, y, cr, cb, 255});
+    return payload;
+  };
+  appendSegment(stream, 0x14, pds(0, 1, 41, 110, 240));  // blue palette 0
+  appendSegment(stream, 0x14, pds(1, 2, 76, 255, 85));   // red palette 1
+  std::vector<uint8_t> ods;
+  appendU16(ods, 1);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.insert(ods.end(), {0, 0, 2});
+  appendU16(ods, 2);
+  appendU16(ods, 2);
+  ods.push_back(4);
+  ods.push_back(1);
+  appendSegment(stream, 0x15, ods);
+  appendSegment(stream, 0x80, {});
+  return stream;
+}
+
+std::vector<uint8_t> makePartialPaletteUpdateDisplaySet() {
+  std::vector<uint8_t> stream;
+  std::vector<uint8_t> pcs;
+  appendU16(pcs, 2);
+  appendU16(pcs, 2);
+  pcs.push_back(0x10);
+  appendU16(pcs, 0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  pcs.push_back(1);
+  appendU16(pcs, 1);
+  pcs.push_back(0);
+  pcs.push_back(0);
+  appendU16(pcs, 0);
+  appendU16(pcs, 0);
+  appendSegment(stream, 0x16, pcs);
+
+  auto pds = [](const uint8_t version, const bool includeEntry0, const uint8_t y,
+                const uint8_t cr, const uint8_t cb) {
+    std::vector<uint8_t> payload{0, version};
+    if (includeEntry0) {
+      payload.insert(payload.end(), {0, 16, 128, 128, 0});
+    }
+    payload.insert(payload.end(), {1, y, cr, cb, 255});
+    return payload;
+  };
+  appendSegment(stream, 0x14, pds(1, true, 76, 255, 85));   // red entry 1
+  appendSegment(stream, 0x14, pds(2, false, 41, 110, 240)); // partial: blue entry 1 only
+  std::vector<uint8_t> ods;
+  appendU16(ods, 1);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.insert(ods.end(), {0, 0, 2});
+  appendU16(ods, 2);
+  appendU16(ods, 2);
+  ods.push_back(4);
+  ods.push_back(1);
+  appendSegment(stream, 0x15, ods);
+  appendSegment(stream, 0x80, {});
+  return stream;
+}
+
+TEST(AVPgsParserTest, SelectsThePcsPaletteId) {
+  const auto stream = makePaletteIdDisplaySet();
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(1u, results.size());
+  const auto& cue = results[0].cues[0];
+  ASSERT_EQ(16u, cue.bitmap.pixels.size());
+  // Palette 1 is red; palette 0 is blue and must not be used.
+  EXPECT_GT(cue.bitmap.pixels[0], 200);
+  EXPECT_LT(cue.bitmap.pixels[2], 60);
+}
+
+TEST(AVPgsParserTest, AppliesAPartialPaletteUpdate) {
+  const auto stream = makePartialPaletteUpdateDisplaySet();
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(1u, results.size());
+  const auto& cue = results[0].cues[0];
+  ASSERT_EQ(16u, cue.bitmap.pixels.size());
+  // The second PDS contains only entry 1; it updates red to blue without clearing the palette.
+  EXPECT_LT(cue.bitmap.pixels[0], 60);
+  EXPECT_LT(cue.bitmap.pixels[1], 60);
+  EXPECT_GT(cue.bitmap.pixels[2], 200);
+}
+
 } // namespace
 
 TEST(AVPgsParserTest, ParsesASmallDisplaySetIntoABitmap) {

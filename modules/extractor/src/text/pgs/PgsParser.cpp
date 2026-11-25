@@ -95,7 +95,13 @@ struct Window final {
 struct Composition final {
   int width = 0;
   int height = 0;
+  uint8_t paletteId = 0;
   std::vector<CompositionObject> objects;
+};
+
+struct Palette final {
+  uint8_t version = 0;
+  std::array<uint32_t, 256> entries{};
 };
 
 } // namespace
@@ -149,7 +155,7 @@ public:
   }
 
   void reset() {
-    palette_.fill(0);
+    palettes_.clear();
     objects_.clear();
     partialObjects_.clear();
     windows_.clear();
@@ -175,7 +181,12 @@ private:
   }
   void parsePds(const uint8_t* data, const size_t size) {
     if (size < 2) return;
-    // palette id = data[0], version = data[1]
+    // palette id = data[0], version = data[1]. A PDS may carry only the entries that changed, so
+    // the existing palette is updated in place rather than replaced.
+    const uint8_t paletteId = data[0];
+    const uint8_t version = data[1];
+    Palette& palette = palettes_[paletteId];
+    palette.version = version;
     size_t position = 2;
     while (position + 5 <= size) {
       const uint8_t index = data[position];
@@ -186,10 +197,10 @@ private:
       const float r = y + 1.402f * (cr - 128.0f);
       const float g = y - 0.344136f * (cb - 128.0f) - 0.714136f * (cr - 128.0f);
       const float b = y + 1.772f * (cb - 128.0f);
-      palette_[index] = (static_cast<uint32_t>(alpha) << 24) |
-                        (static_cast<uint32_t>(clampByte(r)) << 16) |
-                        (static_cast<uint32_t>(clampByte(g)) << 8) |
-                        clampByte(b);
+      palette.entries[index] = (static_cast<uint32_t>(alpha) << 24) |
+                               (static_cast<uint32_t>(clampByte(r)) << 16) |
+                               (static_cast<uint32_t>(clampByte(g)) << 8) |
+                               clampByte(b);
       position += 5;
     }
   }
@@ -293,6 +304,7 @@ private:
     composition_ = Composition{};
     composition_.width = readU16(data, size, 0);
     composition_.height = readU16(data, size, 2);
+    composition_.paletteId = data[9];
     const uint8_t objectCount = data[10];
     size_t position = 11;
     for (uint8_t i = 0; i < objectCount && position + 8 <= size; ++i) {
@@ -361,7 +373,10 @@ private:
       render.sourceY = sourceY;
       render.width = width;
       render.height = height;
-      if (!decodeRle(source.rle.data(), source.rle.size(), source.width, source.height, palette_,
+      static const std::array<uint32_t, 256> kEmptyPalette{};
+      const auto palette = palettes_.find(composition_.paletteId);
+      const auto& entries = palette != palettes_.end() ? palette->second.entries : kEmptyPalette;
+      if (!decodeRle(source.rle.data(), source.rle.size(), source.width, source.height, entries,
             render.rgba)) {
         continue;
       }
@@ -462,7 +477,7 @@ private:
     compositionPtsUs_ = Definitions::kTimeUnset;
   }
 
-  std::array<uint32_t, 256> palette_{};
+  std::map<uint8_t, Palette> palettes_;
   std::map<uint16_t, Object> objects_;
   std::map<uint16_t, PartialObject> partialObjects_;
   std::map<uint8_t, Window> windows_;
