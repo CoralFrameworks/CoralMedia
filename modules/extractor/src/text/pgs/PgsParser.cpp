@@ -160,6 +160,7 @@ public:
     partialObjects_.clear();
     windows_.clear();
     composition_ = Composition{};
+    lastCompositionObjects_.clear();
     compositionPtsUs_ = Definitions::kTimeUnset;
   }
 
@@ -301,11 +302,17 @@ private:
 
   void parsePcs(const uint8_t* data, const size_t size, const uint32_t pts, const bool hasPts) {
     if (size < 11) return;
+    const uint8_t paletteUpdateFlag = data[8];
     composition_ = Composition{};
     composition_.width = readU16(data, size, 0);
     composition_.height = readU16(data, size, 2);
     composition_.paletteId = data[9];
     const uint8_t objectCount = data[10];
+    // A palette-only display set has no object records: it redraws the objects of the previous
+    // composition with the updated palette. A zero-object set without the flag is a clear.
+    if (objectCount == 0 && (paletteUpdateFlag & 0x80) != 0) {
+      composition_.objects = lastCompositionObjects_;
+    }
     size_t position = 11;
     for (uint8_t i = 0; i < objectCount && position + 8 <= size; ++i) {
       CompositionObject object;
@@ -458,6 +465,7 @@ private:
     result.durationUs = Definitions::kTimeUnset;
     result.cues.push_back(std::move(cue));
     results.push_back(std::move(result));
+    lastCompositionObjects_ = composition_.objects;
     resetComposition();
   }
 
@@ -482,6 +490,7 @@ private:
   std::map<uint16_t, PartialObject> partialObjects_;
   std::map<uint8_t, Window> windows_;
   Composition composition_;
+  std::vector<CompositionObject> lastCompositionObjects_;
   int64_t compositionPtsUs_ = Definitions::kTimeUnset;
 };
 

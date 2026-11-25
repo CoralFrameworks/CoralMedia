@@ -35,7 +35,9 @@ namespace coral {
  * part of an object, and a PDS that arrives after an ODS is applied when the display set is
  * composed. An ODS may also be split across first/last segments, and a later ODS version replaces
  * the object with the same id. Palettes are kept per palette id and version, and a PDS may update
- * only the entries it carries. Object decoding is therefore deferred until composition time.
+ * only the entries it carries. A palette-only display set (no object records, palette-update flag
+ * set) redraws the previous composition with the new palette. Object decoding is therefore deferred
+ * until composition time.
  */
 class AVPgsParser final : public AVSubtitleParser {
 public:

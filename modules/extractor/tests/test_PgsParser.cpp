@@ -560,6 +560,74 @@ TEST(AVPgsParserTest, AppliesAPartialPaletteUpdate) {
   EXPECT_GT(cue.bitmap.pixels[2], 200);
 }
 
+std::vector<uint8_t> makePaletteOnlyUpdateDisplaySet() {
+  std::vector<uint8_t> stream;
+  auto pcsWithObject = [](const bool hasObject, const uint8_t paletteUpdateFlag) {
+    std::vector<uint8_t> pcs;
+    appendU16(pcs, 2);
+    appendU16(pcs, 2);
+    pcs.push_back(0x10);
+    appendU16(pcs, 0);
+    pcs.push_back(0);
+    pcs.push_back(paletteUpdateFlag);
+    pcs.push_back(0);  // palette id
+    pcs.push_back(hasObject ? 1 : 0);
+    if (hasObject) {
+      appendU16(pcs, 1);
+      pcs.push_back(0);
+      pcs.push_back(0);
+      appendU16(pcs, 0);
+      appendU16(pcs, 0);
+    }
+    return pcs;
+  };
+  appendSegment(stream, 0x16, pcsWithObject(true, 0));
+
+  std::vector<uint8_t> red{0, 0};
+  red.insert(red.end(), {0, 16, 128, 128, 0});
+  red.insert(red.end(), {1, 76, 255, 85, 255});
+  appendSegment(stream, 0x14, red);
+
+  std::vector<uint8_t> ods;
+  appendU16(ods, 1);
+  ods.push_back(0);
+  ods.push_back(0);
+  ods.insert(ods.end(), {0, 0, 2});
+  appendU16(ods, 2);
+  appendU16(ods, 2);
+  ods.push_back(4);
+  ods.push_back(1);
+  appendSegment(stream, 0x15, ods);
+  appendSegment(stream, 0x80, {});
+
+  // Palette-only update: no object records, palette-update flag set.
+  appendSegment(stream, 0x16, pcsWithObject(false, 0x80));
+  std::vector<uint8_t> blue{0, 1};
+  blue.insert(blue.end(), {1, 41, 110, 240, 255});
+  appendSegment(stream, 0x14, blue);
+  appendSegment(stream, 0x80, {});
+  return stream;
+}
+
+TEST(AVPgsParserTest, ReusesThePreviousObjectsForAPaletteOnlyUpdate) {
+  const auto stream = makePaletteOnlyUpdateDisplaySet();
+  AVPgsParser parser;
+  std::vector<AVCuesWithTiming> results;
+  ASSERT_TRUE(parser.parse(stream.data(), stream.size(),
+    AVSubtitleParser::OutputOptions::allCues(),
+    [&results](const AVCuesWithTiming& cues) { results.push_back(cues); }));
+  ASSERT_EQ(2u, results.size());
+  ASSERT_EQ(1u, results[0].cues.size());
+  ASSERT_EQ(1u, results[1].cues.size());
+  const auto& first = results[0].cues[0];
+  const auto& second = results[1].cues[0];
+  EXPECT_GT(first.bitmap.pixels[0], 200);
+  EXPECT_LT(first.bitmap.pixels[2], 60);
+  EXPECT_LT(second.bitmap.pixels[0], 60);
+  EXPECT_LT(second.bitmap.pixels[1], 60);
+  EXPECT_GT(second.bitmap.pixels[2], 200);
+}
+
 } // namespace
 
 TEST(AVPgsParserTest, ParsesASmallDisplaySetIntoABitmap) {
