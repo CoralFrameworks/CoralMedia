@@ -54,6 +54,11 @@ public:
     }
     const auto writable = mode == PixelBufferLockMode::Write ||
                           mode == PixelBufferLockMode::ReadWrite;
+    if (const auto bgra = mBuffer->asBgraPixelBuffer(); bgra != nullptr) {
+      planes[0] = { bgra->data(), bgra->width() * 4, bgra->width(), bgra->height() };
+      *planeCount = 1;
+      return true;
+    }
     if (const auto i420 = mBuffer->asI420PixelBuffer(); i420 != nullptr) {
       planes[0] = { writable ? i420->mutableDataY() : const_cast<uint8_t*>(i420->dataY()),
         i420->strideY(), i420->width(), i420->height() };

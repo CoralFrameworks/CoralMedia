@@ -20,10 +20,13 @@
 #include <media/Buffer.h>
 #include <media/ColorInfo.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace coral {
 
+class BgraPixelBuffer;
 class I420PixelBuffer;
 class NV12PixelBuffer;
 class PixelBuffer;
@@ -114,6 +117,8 @@ public:
 
   virtual std::shared_ptr<I420PixelBuffer> asI420PixelBuffer() { return nullptr; }
 
+  virtual std::shared_ptr<BgraPixelBuffer> asBgraPixelBuffer() { return nullptr; }
+
   /**
    * Returns the backend-neutral PixelBuffer handle for this frame, or null when the frame has no such
    * handle yet. A decoder implements this without changing its inherited AVPixelBuffer API.
@@ -129,6 +134,60 @@ public:
 protected:
   Rotation mRotation = Rotation::kRotation_0;
   ColorInfo mColorInfo;
+};
+
+/**
+ * The video frame buffer with packed BGRA_8888 pixels in CPU memory.
+ *
+ * <p>This is the layout thumbnail providers and image pipelines produce. It is a plain
+ * AVPixelBuffer, so `PixelBuffer::fromAVPixelBuffer` can expose it through the backend-neutral
+ * handle without a copy.
+ */
+class BgraPixelBuffer final : public AVPixelBuffer,
+                              public std::enable_shared_from_this<BgraPixelBuffer> {
+public:
+  BgraPixelBuffer(const int width, const int height)
+      : mWidth(width), mHeight(height), mData(static_cast<size_t>(width) * height * 4) {
+    mColorInfo.colorSpace = ColorInfo::SpaceType::kSpaceBT709;
+    mColorInfo.colorRange = ColorInfo::RangeType::kRangeLimited;
+    mColorInfo.colorTransfer = ColorInfo::TransferType::kTransferSDR;
+  }
+
+  [[nodiscard]] PixelFormat getFormat() const override {
+    return PixelFormat::kFormatBGRA;
+  }
+
+  [[nodiscard]] int width() const override {
+    return mWidth;
+  }
+
+  [[nodiscard]] int height() const override {
+    return mHeight;
+  }
+
+  [[nodiscard]] uint8_t* data() noexcept {
+    return mData.data();
+  }
+
+  [[nodiscard]] const uint8_t* data() const noexcept {
+    return mData.data();
+  }
+
+  [[nodiscard]] size_t size() const noexcept {
+    return mData.size();
+  }
+
+  void release() override {
+  }
+
+  std::shared_ptr<BgraPixelBuffer> asBgraPixelBuffer() override {
+    return shared_from_this();
+  }
+
+private:
+  int mWidth;
+  int mHeight;
+  std::vector<uint8_t> mData;
 };
 
 /**
