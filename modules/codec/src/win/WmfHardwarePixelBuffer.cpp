@@ -23,9 +23,10 @@
 namespace coral {
 
 WmfHardwarePixelBuffer::WmfHardwarePixelBuffer(Owner<AVPixelBuffer>* owner,
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture, const uint32_t subresource, const int width,
-    const int height, const TextureFormat format)
+    Microsoft::WRL::ComPtr<IMFSample> sample, Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
+    const uint32_t subresource, const int width, const int height, const TextureFormat format)
   : mOwner(owner),
+    mSample(std::move(sample)),
     mTexture(std::move(texture)),
     mSubresource(subresource),
     mWidth(width),
@@ -44,6 +45,9 @@ void* WmfHardwarePixelBuffer::getNativeTexture() const {
 }
 
 void WmfHardwarePixelBuffer::release() {
+  // The consumer is done with the picture, so the pool may refill its slice. Dropping the sample before
+  // the recycle keeps the slice from being held by the decoder's returned-frame queue as well.
+  mSample.Reset();
   if (mOwner != nullptr) {
     mOwner->recycleBuffer(shared_from_this());
   }

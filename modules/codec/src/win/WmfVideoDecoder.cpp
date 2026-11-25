@@ -626,7 +626,14 @@ void WmfVideoDecoder::fillPendingFrames() {
   // The frames the decoder holds are taken out of it even while the caller waits for the time of the
   // frame it was given: a decoder whose outputs stay in place buffers the frames of the stream for the
   // reordering, and hands them out in an order that is no longer the order of the stream.
-  while (mPendingFrames.size() < MAX_PENDING_FRAMES) {
+  //
+  // A hardware decoder is the exception. Each pending frame pins a slice of the DXGI texture pool (the
+  // buffer keeps its IMFSample alive so the pool cannot refill the slice), and the pool is small: taking
+  // the same eight frames the CPU path takes starves the transform, which then blocks waiting for a free
+  // texture and never produces the first frame. Two frames are enough to keep the renderer fed while the
+  // next one decodes, and leave the pool the transform itself needs.
+  const size_t pendingLimit = mHardwareOutput ? 2 : MAX_PENDING_FRAMES;
+  while (mPendingFrames.size() < pendingLimit) {
     auto frame = dequeueDecodedFrame();
     if (frame == nullptr) {
       return;
@@ -851,8 +858,12 @@ WmfVideoDecoder::createHardwareFrameBuffer(const Microsoft::WRL::ComPtr<IMFSampl
   }
   // The decoder may pad the coded size (1088 for a 1080 line picture); the frame's extent is the one the
   // output type negotiated, which the consumer uses to crop and to convert the colour.
-  auto frame = std::make_shared<WmfHardwarePixelBuffer>(this, std::move(texture), subresource, mWidth,
-    mHeight, WmfHardwarePixelBuffer::TextureFormat::kNv12);
+  //
+  // The sample goes into the buffer as well: it is the ticket that keeps the DXGI pool from refilling
+  // this slice with a later picture while the consumer still holds the frame. Keeping the texture alone
+  // is not enough - that is the whole array, and it stays valid.
+  auto frame = std::make_shared<WmfHardwarePixelBuffer>(this, sample, std::move(texture), subresource,
+    mWidth, mHeight, WmfHardwarePixelBuffer::TextureFormat::kNv12);
   frame->timeUs(sampleTimeUs(sample));
   mInputsSinceOutput = static_cast<int>(mPendingInputSamples.size());
   frame->setColorInfo(mOutputColorInfo);

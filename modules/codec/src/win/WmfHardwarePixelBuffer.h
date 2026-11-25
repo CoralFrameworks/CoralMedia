@@ -20,6 +20,7 @@
 #include <codec/HardwareVideo.h>
 
 #include <d3d11.h>
+#include <mfobjects.h>
 #include <wrl/client.h>
 
 #include <cstdint>
@@ -30,16 +31,19 @@ namespace coral {
 /**
  * The Windows half of {@link HardwarePixelBuffer}: a `ID3D11Texture2D` slice the decoder filled in.
  *
- * The buffer holds a reference to the texture rather than to the `IMFSample` it came from. That is the
- * point of a decoded texture: the sample is the decoder allocator's bookkeeping, while the texture is the
- * surface, and keeping the surface alive is what keeps the pool from handing the same slice to the next
- * frame while it is still being sampled.
+ * The buffer keeps the `IMFSample` it came from alive, not only the texture. A decoder that draws into a
+ * DXGI texture array hands out one *slice* per sample, and the sample is the pool's ticket for that
+ * slice: dropping it lets Media Foundation refill the same slice with a later picture while the consumer
+ * still holds this frame. Holding the texture alone is not enough for the same reason - the texture is
+ * the whole array and stays valid. The buffer drops the sample when the consumer releases it, which is
+ * what returns the slice to the decoder pool.
  */
 class WmfHardwarePixelBuffer final : public HardwarePixelBuffer,
                                      public std::enable_shared_from_this<WmfHardwarePixelBuffer> {
 public:
-  WmfHardwarePixelBuffer(Owner<AVPixelBuffer>* owner, Microsoft::WRL::ComPtr<ID3D11Texture2D> texture,
-    uint32_t subresource, int width, int height, TextureFormat format);
+  WmfHardwarePixelBuffer(Owner<AVPixelBuffer>* owner, Microsoft::WRL::ComPtr<IMFSample> sample,
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture, uint32_t subresource, int width, int height,
+    TextureFormat format);
 
   ~WmfHardwarePixelBuffer() override = default;
 
@@ -72,6 +76,8 @@ public:
 
 private:
   Owner<AVPixelBuffer>* mOwner = nullptr;
+  /** Pins the decoder pool's slice: the sample stays alive until the consumer releases this buffer. */
+  Microsoft::WRL::ComPtr<IMFSample> mSample;
   Microsoft::WRL::ComPtr<ID3D11Texture2D> mTexture;
   uint32_t mSubresource = 0;
   int mWidth = 0;
