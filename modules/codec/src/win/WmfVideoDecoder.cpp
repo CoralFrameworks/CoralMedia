@@ -504,6 +504,11 @@ std::shared_ptr<AVPacketBuffer> WmfVideoDecoder::dequeueInputBuffer() {
   // decoders get the same effect from their fixed input buffer pool; the Media Foundation decoder
   // reuses one buffer, so without this it would accept the whole stream in a single call.
   fillPendingFrames();
+  // The output renegotiation can give up and drop the transform while the pending frames are
+  // drained, which also drops the input buffer this call is about to hand out.
+  if (!mConfigured || mInputBuffer == nullptr) {
+    return nullptr;
+  }
   if (mOutstandingOutputCount >= MAX_OUTSTANDING_FRAMES || mPendingFrames.size() >= MAX_PENDING_FRAMES) {
     return nullptr;
   }
@@ -679,6 +684,10 @@ std::shared_ptr<AVPixelBuffer> WmfVideoDecoder::dequeueDecodedFrame() {
     if (result == MF_E_TRANSFORM_STREAM_CHANGE) {
       MINILOG_DEBUG("the video decoder changed its output type");
       if (!negotiateOutputType(true)) {
+        // The transform refused every output type. Another ProcessOutput on it would block the
+        // playback thread inside the hardware MFT, so drop the transform and leave the decoder
+        // unconfigured: the renderer then reads no more input and the player can be released.
+        release();
         return nullptr;
       }
       continue;
