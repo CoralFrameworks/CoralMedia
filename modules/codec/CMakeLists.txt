@@ -113,6 +113,12 @@ endif ()
 
 if (WIN32)
   list(APPEND SRCS
+      src/win/D3D11VAHardwarePixelBuffer.cpp
+      src/win/D3D11VAHardwarePixelBuffer.h
+      src/win/D3D11VAVideoDecoder.cpp
+      src/win/D3D11VAVideoDecoder.h
+      src/win/H264DxvaParser.cpp
+      src/win/H264DxvaParser.h
       src/win/WmfAudioDecoder.cpp
       src/win/WmfAudioDecoder.h
       src/win/WmfAudioEncoder.cpp

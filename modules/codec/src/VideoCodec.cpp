@@ -27,6 +27,7 @@
 
 #if defined(WINDOWS) || defined(WIN32)
 
+#include "win/D3D11VAVideoDecoder.h"
 #include "win/WmfHardwareVideoEncoder.h"
 #include "win/WmfMediaUtils.h"
 #include "win/WmfVideoDecoder.h"
@@ -147,9 +148,14 @@ VideoCodecFactoryImpl::createVideoDecoder(const VideoCodecType codecType, const 
 #endif
 
 #if defined(WINDOWS) || defined(WIN32)
-  // the windows platform video codecs are provided by the media foundation transforms, the
-  // manufacturer is not relevant for the system provided codecs.
+  // The D3D11VA decoder owns the decode pipeline and therefore the completion of its output
+  // textures, which the Media Foundation transform cannot signal. It is the decoder the zero-copy
+  // hardware surface path wants, and it falls back to the Media Foundation decoder internally when
+  // the device or the stream is not supported, so the caller always gets a usable decoder.
   static_cast<void>(manufacturer);
+  if (D3D11VAVideoDecoder::isSupported(codecType)) {
+    return std::make_unique<D3D11VAVideoDecoder>();
+  }
   return std::make_unique<WmfVideoDecoder>();
 #endif
 

@@ -9,7 +9,7 @@ of them:
 | `AVMediaExtractor` (demuxer) | `MediaExtractor` / `NativeExtractor` | `WmfMediaExtractor` | `DarwinMediaExtractor` (AVAssetReader) |
 | `AVMediaMuxer` (muxer) | `MediaMuxer` / `NativeMuxer` | `WmfMediaMuxer` | `DarwinMediaMuxer` (AVAssetWriter) |
 | `AudioDecoder` / `AudioEncoder` | `MediaCodecAudioDecoder` / `MediaCodecAudioEncoder` | `WmfAudioDecoder` / `WmfAudioEncoder` | `DarwinAudioDecoder` / `DarwinAudioEncoder` (AudioConverter) |
-| `VideoDecoder` / `VideoEncoder` | `MediaCodecVideoDecoder` / `MediaCodecVideoEncoder` | `WmfVideoDecoder` / `WmfVideoEncoder` | `DarwinVideoDecoder` / `DarwinVideoEncoder` (VideoToolbox) |
+| `VideoDecoder` / `VideoEncoder` | `MediaCodecVideoDecoder` / `MediaCodecVideoEncoder` | `D3D11VAVideoDecoder` (H.264) / `WmfVideoDecoder` fallback, `WmfVideoEncoder` | `DarwinVideoDecoder` / `DarwinVideoEncoder` (VideoToolbox) |
 | `MediaMetadataRetriever` | `ExtractorMetadataRetriever` (data source + extractor) | same | same |
 | `AudioFileReader` | `NdkAudioFileReader` | `WmfAudioFileReader` | `DarwinAudioFileReader` (ExtAudioFile) |
 | `AudioFileWriter` | `AudioMuxFileWriter` (muxer) | `WmfAudioFileWriter` (sink writer) | `DarwinAudioFileWriter` (ExtAudioFile) |
@@ -48,6 +48,29 @@ The Windows implementation is built on the Media Foundation framework (`mfplat`,
   codecs are the ones the platform provides, for example AAC, MP3, AC3 and FLAC audio and H.264
   video. The audio/video samples are handed over in the Annex B format, which is the format the
   Media Foundation video decoders expect.
+* `src/win/D3D11VAVideoDecoder.*`, `src/win/H264DxvaParser.*`,
+  `src/win/D3D11VAHardwarePixelBuffer.*` — the zero-copy H.264 decoder based on Direct3D 11 Video
+  Acceleration. A Media Foundation decoder owns its output surface and exposes no completion signal
+  for the driver's write into it, so a renderer that samples the surface right after `ProcessOutput`
+  can read a picture the GPU is still writing; that is the tearing the zero-copy EffectEngine input
+  shows with the transform. D3D11VA puts the decode pipeline in the caller's hands instead: the
+  decoder allocates its own output texture array on the `ID3D11Device` of the
+  `HardwareVideoSurface`, submits the picture parameters, the slice data and the short slice control
+  table through `ID3D11VideoContext`, and knows exactly when `DecoderEndFrame` completed. It waits on
+  a `D3D11_QUERY_EVENT` of its immediate context before a frame is handed out, so every
+  `HardwarePixelBuffer` is complete when the renderer samples it.
+  The H.264 access units are parsed by `H264DxvaParser` (Annex B or AVCC, SPS/PPS, slice header,
+  picture order count, reference picture marking), and the decoder maintains the decoded picture
+  buffer, the sliding window and the MMCO commands, reorders the output by picture order count, and
+  keeps its decoded frames in an internal pool of 18 slots, like the MFT decoder keeps its pending
+  frames: a caller that holds the frame it renders does not stall the decode of the following
+  pictures. `MediaFormat::processFormat == PixelFormat::kFormatBGRA` is honoured: the decoder
+  converts the NV12 picture to a packed BGRA texture with the device's video processor, so a consumer
+  that samples one RGBA texture stays zero-copy. The decoder covers progressive 8-bit 4:2:0 H.264;
+  a stream with field coding, slice groups, scaling matrices or 10-bit samples, a device without the
+  H.264 NV12 decode profile, or a format without a hardware surface falls back to `WmfVideoDecoder`
+  internally, so the factory contract is unchanged. D3D11VA has no encoder, so the hardware encoder
+  remains the Media Foundation one (`WmfHardwareVideoEncoder`).
 * `src/win/WmfAudioFileReader.*` — the `AudioFileReader` based on `IMFSourceReader`, the audio of
   the file is decoded to 16 bit PCM.
 * `src/win/WmfAudioFileWriter.*` — the `AudioFileWriter` based on `IMFSinkWriter`. The sink writer
@@ -55,6 +78,40 @@ The Windows implementation is built on the Media Foundation framework (`mfplat`,
   type, so the m4a/aac and the wav files are written without any further platform support.
   The `AudioMuxFileWriter` (the encoder of the platform combined with `WmfMediaMuxer`) is available
   as well.
+
+### The Windows zero-copy frame path
+
+The decoder is selected by the same factory as before, and asks for a `HardwareVideoSurface` whose
+`getNativeDevice()` is the `ID3D11Device` the application renders with:
+
+```cpp
+class D3d11HardwareSurface final : public coral::HardwareVideoSurface {
+public:
+  [[nodiscard]] void* getInstance() const override { return device; }
+  [[nodiscard]] void* getNativeDevice() const override { return device; } // ID3D11Device*
+  [[nodiscard]] bool isValid() const override { return device != nullptr; }
+  void release() override {}
+};
+
+auto decoder = coral::CreateBuiltinVideoCodecFactory()->createVideoDecoder(
+  coral::VideoCodecType::kVideoCodecTypeH264, coral::CodecManufacturer::kHardware);
+decoder->configure(trackFormat, std::make_shared<D3d11HardwareSurface>());
+
+auto frame = decoder->dequeueOutputBuffer();
+if (auto hardware = std::dynamic_pointer_cast<coral::HardwarePixelBuffer>(frame)) {
+  // The decoded picture is a slice of the decoder's D3D11 texture array; no pixels were copied, and
+  // the decoder already waited for the GPU write of that picture.
+  auto* texture = static_cast<ID3D11Texture2D*>(hardware->getNativeTexture());
+  const auto subresource = hardware->getSubresource();
+}
+```
+
+`MediaFormat::processFormat` is the same request as on the Apple platforms: `kFormatBGRA` makes the
+decoder produce one packed BGRA texture per frame (through the device's video processor), which is
+what a consumer that samples a single RGBA texture wants, and the default NV12 layout is what a YUV
+consumer (the video processor of the player, for example) wants. The window and the effect graph are
+free to keep the `HardwarePixelBuffer` while more frames are decoded: the buffer keeps its texture
+alive and its slot returns to the decoder only when the last reference is released.
 
 ## Implementation of the Apple platforms
 
