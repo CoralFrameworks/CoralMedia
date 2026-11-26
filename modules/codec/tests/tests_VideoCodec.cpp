@@ -18,6 +18,7 @@
 
 #if defined(WINDOWS) || defined(WIN32)
 
+#include <win/D3D11VAVideoDecoder.h>
 #include <win/WmfMediaUtils.h>
 #include <win/WmfVideoDecoder.h>
 #include <win/WmfVideoEncoder.h>
@@ -478,6 +479,62 @@ void decodeFramesWithDroppedFrames(VideoDecoder* decoder, const std::vector<Enco
   *outDecodedFrames = decoded;
 }
 
+/**
+ * Reads the luma plane of a decoded NV12 frame back from the texture and returns its statistics. A
+ * decoder that returns a texture without a picture leaves the plane at the driver's fill value, which
+ * makes the variance zero; the hardware-frame tests are the place that catches it.
+ */
+bool readLumaStats(HardwarePixelBuffer* hardware, double* variance, double* mean) {
+  if (hardware == nullptr || variance == nullptr || mean == nullptr) {
+    return false;
+  }
+  auto* texture = static_cast<ID3D11Texture2D*>(hardware->getNativeTexture());
+  if (texture == nullptr) {
+    return false;
+  }
+  ComPtr<ID3D11Device> device;
+  texture->GetDevice(&device);
+  if (device == nullptr) {
+    return false;
+  }
+  ComPtr<ID3D11DeviceContext> context;
+  device->GetImmediateContext(&context);
+  D3D11_TEXTURE2D_DESC description{};
+  texture->GetDesc(&description);
+  description.ArraySize = 1;
+  description.MipLevels = 1;
+  description.Usage = D3D11_USAGE_STAGING;
+  description.BindFlags = 0;
+  description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  description.MiscFlags = 0;
+  ComPtr<ID3D11Texture2D> staging;
+  if (FAILED(device->CreateTexture2D(&description, nullptr, &staging)) || staging == nullptr) {
+    return false;
+  }
+  context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture,
+    hardware->getSubresource(), nullptr);
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+    return false;
+  }
+  const auto* luma = static_cast<const uint8_t*>(mapped.pData);
+  double sum = 0;
+  double sumSquares = 0;
+  uint64_t count = 0;
+  for (UINT row = 0; row < description.Height; ++row) {
+    const auto* data = luma + static_cast<size_t>(row) * mapped.RowPitch;
+    for (UINT column = 0; column < description.Width; ++column) {
+      const double value = data[column];
+      sum += value;
+      sumSquares += value * value;
+      ++count;
+    }
+  }
+  context->Unmap(staging.Get(), 0);
+  *mean = sum / static_cast<double>(count);
+  *variance = sumSquares / static_cast<double>(count) - (*mean) * (*mean);
+  return true;
+}
 } // namespace anonymous
 
 TEST(WmfVideoCodec, DecodesIntoDirect3D11Textures) {
@@ -581,6 +638,235 @@ TEST(WmfVideoCodec, DecodesIntoDirect3D11Textures) {
   // Every frame that arrived as a `HardwarePixelBuffer` has to hold an NV12 texture; a frame that claimed
   // to be hardware and carried something else would reach the converter with a format it cannot read.
   EXPECT_EQ(hardwareFrames, textureFrames);
+}
+
+TEST(D3D11VAVideoCodec, DecodesIntoDirect3D11Textures) {
+  std::vector<EncodedPacket> packets;
+  std::shared_ptr<MediaFormat> encodedFormat;
+  ASSERT_TRUE(encodeFrames(packets, encodedFormat));
+
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
+  if (FAILED(::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+        D3D11_SDK_VERSION, &device, &level, &context))) {
+    GTEST_SKIP() << "no Direct3D 11 device with video support is available";
+  }
+  ComPtr<ID3D11VideoDevice> videoDevice;
+  if (FAILED(device.As(&videoDevice)) || videoDevice == nullptr) {
+    GTEST_SKIP() << "the device has no video decode interface";
+  }
+  constexpr GUID h264VldNoFgt = {
+    0x1b81be68, 0xa0c7, 0x11d3, { 0xb9, 0x84, 0x00, 0xc0, 0x4f, 0x2e, 0x73, 0xc5 }
+  };
+  BOOL supportsNv12 = FALSE;
+  if (FAILED(videoDevice->CheckVideoDecoderFormat(&h264VldNoFgt, DXGI_FORMAT_NV12, &supportsNv12)) ||
+      !supportsNv12) {
+    GTEST_SKIP() << "the device has no H.264 NV12 decode profile";
+  }
+
+  auto decoder = std::make_unique<D3D11VAVideoDecoder>();
+  ASSERT_TRUE(decoder->configure(encodedFormat,
+    std::make_shared<TestHardwareVideoSurface>(device.Get())));
+  ASSERT_NE(decoder->getOutputFormat(), nullptr);
+  EXPECT_EQ(decoder->getOutputFormat()->getPixelFormat(), PixelFormat::kFormatNV12);
+  decoder->start();
+
+  int decodedFrames = 0;
+  int hardwareFrames = 0;
+  double firstVariance = -1.0;
+  double firstMean = 0.0;
+  bool pixelsChecked = false;
+  const auto drainOutput = [&]() {
+    while (true) {
+      auto output = decoder->dequeueOutputBuffer();
+      if (output == nullptr) {
+        return false;
+      }
+      if (output->isEndOfStream()) {
+        output->release();
+        return true;
+      }
+      ++decodedFrames;
+      if (const auto hardware = std::dynamic_pointer_cast<HardwarePixelBuffer>(output);
+          hardware != nullptr) {
+        ++hardwareFrames;
+        EXPECT_EQ(HardwarePixelBuffer::TextureFormat::kNv12, hardware->getTextureFormat());
+        EXPECT_EQ(PixelFormat::kFormatNV12, hardware->getFormat());
+        auto* texture = static_cast<ID3D11Texture2D*>(hardware->getNativeTexture());
+        EXPECT_NE(nullptr, texture);
+        if (texture != nullptr) {
+          ComPtr<ID3D11Device> textureDevice;
+          texture->GetDevice(&textureDevice);
+          EXPECT_EQ(device.Get(), textureDevice.Get());
+          D3D11_TEXTURE2D_DESC description{};
+          texture->GetDesc(&description);
+          EXPECT_EQ(DXGI_FORMAT_NV12, description.Format);
+          EXPECT_LT(hardware->getSubresource(), description.ArraySize);
+          if (!pixelsChecked) {
+            pixelsChecked = true;
+            if (!readLumaStats(hardware.get(), &firstVariance, &firstMean)) {
+              firstVariance = -1.0;
+            }
+          }
+        }
+      }
+      output->release();
+    }
+  };
+
+  for (const auto& packet : packets) {
+    int guard = 0;
+    while (true) {
+      auto input = decoder->dequeueInputBuffer();
+      if (input != nullptr) {
+        input->ensureSpaceForWrite(packet.data.size());
+        const auto data = input->data();
+        data->position(0);
+        data->put(packet.data.data(), packet.data.size());
+        data->flip();
+        input->timeUs(packet.timeUs);
+        if (packet.keyFrame) {
+          input->addFlag(AVBufferFlags::kKeyFrame);
+        }
+        decoder->queueInputBuffer(input);
+        break;
+      }
+      if (drainOutput() || ++guard > 1000) {
+        break;
+      }
+    }
+    drainOutput();
+  }
+  decoder->signalEndOfInputStream();
+  int guard = 0;
+  while (!drainOutput() && ++guard < 1000) {
+  }
+  decoder->stop();
+  decoder->release();
+
+  EXPECT_GE(decodedFrames, FRAME_COUNT - 2);
+  if (hardwareFrames == 0) {
+    GTEST_SKIP() << "the D3D11VA decoder produced CPU frames only";
+  }
+  ASSERT_TRUE(pixelsChecked) << "no hardware frame carried a texture";
+  // A texture whose luma plane has no variance is the driver's blank fill: the frame was handed out
+  // but the decode never wrote a picture, which is exactly the failure the zero-copy chain shows.
+  EXPECT_GT(firstVariance, 10.0) << "the decoded picture is blank (mean=" << firstMean << ")";
+  EXPECT_EQ(hardwareFrames, decodedFrames);
+}
+
+TEST(D3D11VAVideoCodec, ProcessFormatConvertsToBgra) {
+  std::vector<EncodedPacket> packets;
+  std::shared_ptr<MediaFormat> encodedFormat;
+  ASSERT_TRUE(encodeFrames(packets, encodedFormat));
+
+  ComPtr<ID3D11Device> device;
+  ComPtr<ID3D11DeviceContext> context;
+  D3D_FEATURE_LEVEL level = D3D_FEATURE_LEVEL_11_0;
+  if (FAILED(::D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+        D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+        D3D11_SDK_VERSION, &device, &level, &context))) {
+    GTEST_SKIP() << "no Direct3D 11 device with video support is available";
+  }
+
+  auto format = encodedFormat->buildUpon();
+  format->setProcessFormat(PixelFormat::kFormatBGRA);
+  auto decoder = std::make_unique<D3D11VAVideoDecoder>();
+  ASSERT_TRUE(decoder->configure(format, std::make_shared<TestHardwareVideoSurface>(device.Get())));
+  ASSERT_NE(decoder->getOutputFormat(), nullptr);
+  EXPECT_EQ(decoder->getOutputFormat()->getPixelFormat(), PixelFormat::kFormatBGRA);
+  decoder->start();
+
+  int hardwareFrames = 0;
+  int bgraFrames = 0;
+  const auto drainOutput = [&]() {
+    while (true) {
+      auto output = decoder->dequeueOutputBuffer();
+      if (output == nullptr) {
+        return false;
+      }
+      if (output->isEndOfStream()) {
+        output->release();
+        return true;
+      }
+      if (const auto hardware = std::dynamic_pointer_cast<HardwarePixelBuffer>(output);
+          hardware != nullptr) {
+        ++hardwareFrames;
+        if (hardware->getTextureFormat() == HardwarePixelBuffer::TextureFormat::kRgba &&
+            hardware->getFormat() == PixelFormat::kFormatBGRA) {
+          auto* texture = static_cast<ID3D11Texture2D*>(hardware->getNativeTexture());
+          if (texture != nullptr) {
+            D3D11_TEXTURE2D_DESC description{};
+            texture->GetDesc(&description);
+            if (description.Format == DXGI_FORMAT_B8G8R8A8_UNORM) {
+              ++bgraFrames;
+            }
+          }
+        }
+      }
+      output->release();
+    }
+  };
+
+  for (const auto& packet : packets) {
+    int guard = 0;
+    while (true) {
+      auto input = decoder->dequeueInputBuffer();
+      if (input != nullptr) {
+        input->ensureSpaceForWrite(packet.data.size());
+        const auto data = input->data();
+        data->position(0);
+        data->put(packet.data.data(), packet.data.size());
+        data->flip();
+        input->timeUs(packet.timeUs);
+        if (packet.keyFrame) {
+          input->addFlag(AVBufferFlags::kKeyFrame);
+        }
+        decoder->queueInputBuffer(input);
+        break;
+      }
+      if (drainOutput() || ++guard > 1000) {
+        break;
+      }
+    }
+    drainOutput();
+  }
+  decoder->signalEndOfInputStream();
+  int guard = 0;
+  while (!drainOutput() && ++guard < 1000) {
+  }
+  decoder->stop();
+  decoder->release();
+
+  if (hardwareFrames == 0) {
+    GTEST_SKIP() << "the D3D11VA decoder produced CPU frames only";
+  }
+  // A device whose video processor cannot write BGRA degrades to NV12, which is the documented
+  // behaviour; when the conversion is available every frame is one packed BGRA texture.
+  if (bgraFrames == 0) {
+    GTEST_SKIP() << "this device converts no NV12 to BGRA through its video processor";
+  }
+  EXPECT_EQ(hardwareFrames, bgraFrames);
+}
+
+TEST(D3D11VAVideoCodec, FallsBackWithoutAHardwareSurface) {
+  std::vector<EncodedPacket> packets;
+  std::shared_ptr<MediaFormat> encodedFormat;
+  ASSERT_TRUE(encodeFrames(packets, encodedFormat));
+
+  auto decoder = std::make_unique<D3D11VAVideoDecoder>();
+  ASSERT_TRUE(decoder->configure(encodedFormat, nullptr));
+  decoder->start();
+  int width = 0;
+  int height = 0;
+  const auto frames = decodeFrames(decoder.get(), packets, &width, &height);
+  decoder->stop();
+  decoder->release();
+  EXPECT_EQ(width, WIDTH);
+  EXPECT_EQ(height, HEIGHT);
+  EXPECT_GE(frames, FRAME_COUNT - 2);
 }
 
 TEST(WmfVideoCodec, EncodeDecodeRoundTrip) {
