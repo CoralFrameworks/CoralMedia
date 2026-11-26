@@ -479,6 +479,62 @@ void decodeFramesWithDroppedFrames(VideoDecoder* decoder, const std::vector<Enco
   *outDecodedFrames = decoded;
 }
 
+/**
+ * Reads the luma plane of a decoded NV12 frame back from the texture and returns its statistics. A
+ * decoder that returns a texture without a picture leaves the plane at the driver's fill value, which
+ * makes the variance zero; the hardware-frame tests are the place that catches it.
+ */
+bool readLumaStats(HardwarePixelBuffer* hardware, double* variance, double* mean) {
+  if (hardware == nullptr || variance == nullptr || mean == nullptr) {
+    return false;
+  }
+  auto* texture = static_cast<ID3D11Texture2D*>(hardware->getNativeTexture());
+  if (texture == nullptr) {
+    return false;
+  }
+  ComPtr<ID3D11Device> device;
+  texture->GetDevice(&device);
+  if (device == nullptr) {
+    return false;
+  }
+  ComPtr<ID3D11DeviceContext> context;
+  device->GetImmediateContext(&context);
+  D3D11_TEXTURE2D_DESC description{};
+  texture->GetDesc(&description);
+  description.ArraySize = 1;
+  description.MipLevels = 1;
+  description.Usage = D3D11_USAGE_STAGING;
+  description.BindFlags = 0;
+  description.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+  description.MiscFlags = 0;
+  ComPtr<ID3D11Texture2D> staging;
+  if (FAILED(device->CreateTexture2D(&description, nullptr, &staging)) || staging == nullptr) {
+    return false;
+  }
+  context->CopySubresourceRegion(staging.Get(), 0, 0, 0, 0, texture,
+    hardware->getSubresource(), nullptr);
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  if (FAILED(context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped))) {
+    return false;
+  }
+  const auto* luma = static_cast<const uint8_t*>(mapped.pData);
+  double sum = 0;
+  double sumSquares = 0;
+  uint64_t count = 0;
+  for (UINT row = 0; row < description.Height; ++row) {
+    const auto* data = luma + static_cast<size_t>(row) * mapped.RowPitch;
+    for (UINT column = 0; column < description.Width; ++column) {
+      const double value = data[column];
+      sum += value;
+      sumSquares += value * value;
+      ++count;
+    }
+  }
+  context->Unmap(staging.Get(), 0);
+  *mean = sum / static_cast<double>(count);
+  *variance = sumSquares / static_cast<double>(count) - (*mean) * (*mean);
+  return true;
+}
 } // namespace anonymous
 
 TEST(WmfVideoCodec, DecodesIntoDirect3D11Textures) {
@@ -619,6 +675,9 @@ TEST(D3D11VAVideoCodec, DecodesIntoDirect3D11Textures) {
 
   int decodedFrames = 0;
   int hardwareFrames = 0;
+  double firstVariance = -1.0;
+  double firstMean = 0.0;
+  bool pixelsChecked = false;
   const auto drainOutput = [&]() {
     while (true) {
       auto output = decoder->dequeueOutputBuffer();
@@ -645,6 +704,12 @@ TEST(D3D11VAVideoCodec, DecodesIntoDirect3D11Textures) {
           texture->GetDesc(&description);
           EXPECT_EQ(DXGI_FORMAT_NV12, description.Format);
           EXPECT_LT(hardware->getSubresource(), description.ArraySize);
+          if (!pixelsChecked) {
+            pixelsChecked = true;
+            if (!readLumaStats(hardware.get(), &firstVariance, &firstMean)) {
+              firstVariance = -1.0;
+            }
+          }
         }
       }
       output->release();
@@ -685,6 +750,10 @@ TEST(D3D11VAVideoCodec, DecodesIntoDirect3D11Textures) {
   if (hardwareFrames == 0) {
     GTEST_SKIP() << "the D3D11VA decoder produced CPU frames only";
   }
+  ASSERT_TRUE(pixelsChecked) << "no hardware frame carried a texture";
+  // A texture whose luma plane has no variance is the driver's blank fill: the frame was handed out
+  // but the decode never wrote a picture, which is exactly the failure the zero-copy chain shows.
+  EXPECT_GT(firstVariance, 10.0) << "the decoded picture is blank (mean=" << firstMean << ")";
   EXPECT_EQ(hardwareFrames, decodedFrames);
 }
 

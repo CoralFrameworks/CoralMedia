@@ -1035,6 +1035,23 @@ bool D3D11VAVideoDecoder::submitFrame(DXVA_PicParams_H264& pictureParameters,
     mVideoContext->ReleaseDecoderBuffer(mVideoDecoder.Get(), D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS);
   }
 
+  // Inverse quantization matrix. The DXVA H.264 stream syntax carries it as a separate buffer; the
+  // streams that use the default matrices are described by the flat (all 16) tables, which is what the
+  // specification defines for a picture which has no scaling lists.
+  DXVA_Qmatrix_H264 qmatrix{};
+  std::memset(&qmatrix, 16, sizeof(qmatrix));
+  if (success) {
+    result = mVideoContext->GetDecoderBuffer(mVideoDecoder.Get(),
+            D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX, &bufferSize, &bufferData);
+    if (FAILED(result) || bufferData == nullptr || bufferSize < sizeof(qmatrix)) {
+      MINILOG_WARN("the D3D11VA quantization matrix buffer is not available");
+      success = false;
+    } else {
+      std::memcpy(bufferData, &qmatrix, sizeof(qmatrix));
+      mVideoContext->ReleaseDecoderBuffer(mVideoDecoder.Get(),
+              D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX);
+    }
+  }
   // Slice data. The driver parses the slice headers, so every slice NAL is copied with the start code
   // which the DXVA stream syntax uses.
   std::vector<DXVA_Slice_H264_Short> sliceControl;
@@ -1095,14 +1112,16 @@ bool D3D11VAVideoDecoder::submitFrame(DXVA_PicParams_H264& pictureParameters,
   }
 
   if (success) {
-    D3D11_VIDEO_DECODER_BUFFER_DESC descriptions[3];
+    D3D11_VIDEO_DECODER_BUFFER_DESC descriptions[4];
     fillBufferDesc(descriptions[0], D3D11_VIDEO_DECODER_BUFFER_PICTURE_PARAMETERS,
             static_cast<UINT>(sizeof(pictureParameters)), 0);
-    fillBufferDesc(descriptions[1], D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, bitstreamWritten,
+    fillBufferDesc(descriptions[1], D3D11_VIDEO_DECODER_BUFFER_INVERSE_QUANTIZATION_MATRIX,
+            static_cast<UINT>(sizeof(qmatrix)), 0);
+    fillBufferDesc(descriptions[2], D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, bitstreamWritten,
             static_cast<UINT>(macroblocks));
-    fillBufferDesc(descriptions[2], D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
+    fillBufferDesc(descriptions[3], D3D11_VIDEO_DECODER_BUFFER_SLICE_CONTROL,
             static_cast<UINT>(sliceControl.size() * sizeof(DXVA_Slice_H264_Short)), static_cast<UINT>(macroblocks));
-    result = mVideoContext->SubmitDecoderBuffers(mVideoDecoder.Get(), 3, descriptions);
+    result = mVideoContext->SubmitDecoderBuffers(mVideoDecoder.Get(), 4, descriptions);
     if (FAILED(result)) {
       MINILOG_WARN("the D3D11VA decoder rejected the frame: {}", WmfMediaUtils::hresultToString(result));
       success = false;
@@ -1435,7 +1454,9 @@ void D3D11VAVideoDecoder::applyReferenceMarking(const d3d11va::Sps& sps, const d
   }
 }
 
-void D3D11VAVideoDecoder::dropShortTermReference(const std::shared_ptr<Picture>& picture) {
+void D3D11VAVideoDecoder::dropShortTermReference(std::shared_ptr<Picture> picture) {
+  // The picture is copied deliberately: it may be an element of mShortTermReferences, and the
+  // erase below moves and destroys that element while this function still reads from it.
   if (picture == nullptr) {
     return;
   }
@@ -1447,7 +1468,9 @@ void D3D11VAVideoDecoder::dropShortTermReference(const std::shared_ptr<Picture>&
   }
 }
 
-void D3D11VAVideoDecoder::dropLongTermReference(const std::shared_ptr<Picture>& picture) {
+void D3D11VAVideoDecoder::dropLongTermReference(std::shared_ptr<Picture> picture) {
+  // Copied for the same reason: the caller may pass an element of mLongTermReferences, which the
+  // erase below destroys.
   if (picture == nullptr) {
     return;
   }

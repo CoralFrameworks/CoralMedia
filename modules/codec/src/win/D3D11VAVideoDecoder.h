@@ -219,9 +219,9 @@ class D3D11VAVideoDecoder final : public VideoDecoder, public AVPixelBuffer::Own
   void applyReferenceMarking(const d3d11va::Sps& sps, const d3d11va::Pps& pps, const d3d11va::SliceHeader& header,
           bool idr, const std::shared_ptr<Picture>& picture);
 
-  void dropShortTermReference(const std::shared_ptr<Picture>& picture);
+  void dropShortTermReference(std::shared_ptr<Picture> picture);
 
-  void dropLongTermReference(const std::shared_ptr<Picture>& picture);
+  void dropLongTermReference(std::shared_ptr<Picture> picture);
 
   std::shared_ptr<Picture> findShortTermReference(uint32_t frameNumWrap);
 
