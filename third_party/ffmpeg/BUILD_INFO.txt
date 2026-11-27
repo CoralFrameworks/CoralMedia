@@ -1,13 +1,12 @@
 FFmpeg prebuilt package
 
-Version:                 (fill in upstream release/commit)
-Source:                  (fill in source tarball or commit URL)
-Configure:               (fill in configure arguments)
-Toolchain:               (fill in compiler/NDK/MSVC version)
-Targets:
-  Android arm64-v8a:     libffmpeg.so
-  Android armeabi-v7a:   libffmpeg.so
-  Windows x64:           not populated in this checkout
-  Linux x86_64:          not populated in this checkout
-License:                 FFmpeg is LGPL/GPL depending on the build configuration.
-                         Include the matching COPYING/LGPL/GPL license files when publishing.
+Version:                 9.1
+Source:                  https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz
+License:                 LGPL-2.1-or-later (built without --enable-gpl/--enable-nonfree)
+Android:                 NDK 30.0.16248370, API 21, arm64-v8a + armeabi-v7a
+                         one libffmpeg.so per ABI, built without NEON assembly
+Windows x64:             MSYS2/MinGW-w64 gcc 16.2, shared DLLs + import libraries
+Linux x86_64:            GCC 14.2, shared libav*/libsw* libraries (CI artifact)
+AV1:                     libdav1d on Windows and Linux; the Android build uses the platform
+                         AV1 decoder because FFmpeg 9's native AV1 decoder is hardware-only
+Build scripts and flags: https://github.com/CoralFrameworks/FfmpegBuilder

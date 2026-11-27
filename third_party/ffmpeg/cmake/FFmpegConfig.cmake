@@ -51,12 +51,7 @@ else ()
 endif ()
 
 set(_ffmpeg_dir "${_ffmpeg_root}/${_ffmpeg_platform}/${_ffmpeg_arch}")
-if (EXISTS "${_ffmpeg_dir}/include")
-  set(_ffmpeg_include "${_ffmpeg_dir}/include")
-else ()
-  # Older packages keep one include tree at the root.
-  set(_ffmpeg_include "${_ffmpeg_root}/include")
-endif ()
+set(_ffmpeg_include "${_ffmpeg_dir}/include")
 
 if (NOT EXISTS "${_ffmpeg_include}")
   message(FATAL_ERROR "FFmpegConfig: no headers under ${_ffmpeg_include}")
