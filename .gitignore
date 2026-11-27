@@ -11,3 +11,4 @@ toolchains
 /out*
 /build
 /build-*
+/third_party/ffmpeg/linux/

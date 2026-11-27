@@ -1,0 +1,80 @@
+name: Linux FFmpeg
+
+# The Linux FFmpeg package is a CI product of CoralFrameworks/FfmpegBuilder. The first job builds it
+# from that repository and uploads the archive; the second job consumes the artifact, so no shared
+# library, header or symlink of the package is checked into CoralMedia.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ffmpeg-linux:
+    name: Build FFmpeg Linux package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout FfmpegBuilder
+        uses: actions/checkout@v4
+        with:
+          repository: CoralFrameworks/FfmpegBuilder
+          path: ffmpeg-builder
+
+      - name: Install FFmpeg build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential nasm yasm pkg-config libdav1d-dev
+
+      - name: Build FFmpeg
+        working-directory: ffmpeg-builder
+        run: ./scripts/build-linux.sh
+
+      - name: Upload the Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-linux-9.1
+          path: |
+            ffmpeg-builder/dist/ffmpeg-9.1-linux-x86_64.tar.gz
+            ffmpeg-builder/dist/ffmpeg-9.1-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+
+  coralmedia-linux:
+    name: Build CoralMedia with the FFmpeg artifact
+    needs: ffmpeg-linux
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout CoralMedia
+        uses: actions/checkout@v4
+
+      - name: Fetch the dependencies of a standalone checkout
+        run: |
+          git submodule update --init --recursive \
+            -c submodule.third_party/libz.update=checkout \
+            -c submodule.third_party/libyuv.update=checkout \
+            -c submodule.external/CoralCore.update=checkout
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libdav1d-dev
+
+      - name: Download the FFmpeg artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-linux-9.1
+          path: ffmpeg-artifact
+
+      - name: Extract the FFmpeg package
+        run: |
+          tar -xzf ffmpeg-artifact/ffmpeg-9.1-linux-x86_64.tar.gz -C ffmpeg-artifact
+          test -f ffmpeg-artifact/ffmpeg-9.1-linux-x86_64/cmake/FFmpegConfig.cmake
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-ffmpeg -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCORAL_SUPPORTS_FFMPEG=ON \
+            -DCORAL_BUILD_TESTS=OFF \
+            -DCORAL_FFMPEG_DIR="${{ github.workspace }}/ffmpeg-artifact/ffmpeg-9.1-linux-x86_64"
+
+      - name: Build the FFmpeg codec module
+        run: cmake --build build-ffmpeg --target ffcodec media-registry --parallel

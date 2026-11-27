@@ -19,6 +19,8 @@
 
 #include <codec/AudioFileReader.h>
 
+#include <atomic>
+
 #include "private/ffcodec/FfmpegUtils.h"
 
 namespace coral {
