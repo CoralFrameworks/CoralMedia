@@ -212,6 +212,18 @@ int readBits(AVBitReader& bits, const int count) {
   return static_cast<int>(bits.readBits(count));
 }
 
+void skipAvcScalingList(AVBitReader& reader, const int size) {
+  int lastScale = 8;
+  int nextScale = 8;
+  for (int i = 0; i < size; ++i) {
+    if (nextScale != 0) {
+      const int deltaScale = readSe(reader);
+      nextScale = (lastScale + deltaScale + 256) % 256;
+    }
+    lastScale = nextScale == 0 ? lastScale : nextScale;
+  }
+}
+
 /**
  * Parses the SPS of an H.264 stream and returns its dimensions and the fields that identify the
  * codec.
@@ -227,9 +239,29 @@ bool parseAvcSps(const std::vector<uint8_t>& sps, int& outWidth, int& outHeight,
   auto buffer = std::make_shared<AVDataBuffer>(sps);
   AVBitReader reader(buffer);
   reader.skipBits(32);
-  const int chromaFormatIdc = readUe(reader);
-  if (chromaFormatIdc == 3) {
-    reader.skipBits(1);
+  int chromaFormatIdc = 1;
+  const int profileIdc = sps[1];
+  const bool highProfile = profileIdc == 100 || profileIdc == 110 || profileIdc == 122 ||
+                           profileIdc == 244 || profileIdc == 44 || profileIdc == 83 ||
+                           profileIdc == 86 || profileIdc == 118 || profileIdc == 128 ||
+                           profileIdc == 138 || profileIdc == 139 || profileIdc == 134 ||
+                           profileIdc == 135;
+  if (highProfile) {
+    chromaFormatIdc = readUe(reader);
+    if (chromaFormatIdc == 3) {
+      reader.skipBits(1);
+    }
+    static_cast<void>(readUe(reader)); // bit_depth_luma_minus8
+    static_cast<void>(readUe(reader)); // bit_depth_chroma_minus8
+    reader.skipBits(1); // qpprime_y_zero_transform_bypass_flag
+    if (readBits(reader, 1) != 0) {
+      const int scalingListCount = chromaFormatIdc != 3 ? 8 : 12;
+      for (int i = 0; i < scalingListCount; ++i) {
+        if (readBits(reader, 1) != 0) {
+          skipAvcScalingList(reader, i < 6 ? 16 : 64);
+        }
+      }
+    }
   }
   static_cast<void>(readUe(reader)); // log2_max_frame_num_minus4
   const int picOrderCountType = readUe(reader);
