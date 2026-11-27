@@ -302,11 +302,15 @@ bool WmfVideoDecoder::createInputMediaType() {
   // The H.264/HEVC decoders need the sequence header when the stream does not contain the
   // parameter sets in band.
   const auto& csdList = mInputFormat->csdList();
-  if (!csdList.empty() && !csdList[0].empty()) {
+  std::vector<uint8_t> csd;
+  for (const auto& buffer : csdList) {
+    csd.insert(csd.end(), buffer.begin(), buffer.end());
+  }
+  if (!csd.empty()) {
     const auto sequenceHeader = mInputSubType == MFVideoFormat_H264
-                                ? normalizeH264SequenceHeader(csdList[0])
-                                : csdList[0];
-    mPrependSequenceHeader = mInputSubType == MFVideoFormat_H264 && isAnnexB(csdList[0]);
+                                ? normalizeH264SequenceHeader(csd)
+                                : csd;
+    mPrependSequenceHeader = mInputSubType == MFVideoFormat_H264 && isAnnexB(csd);
     mSequenceHeaderPrepended = false;
     mediaType->SetBlob(MF_MT_MPEG_SEQUENCE_HEADER, sequenceHeader.data(),
       static_cast<UINT32>(sequenceHeader.size()));
@@ -548,8 +552,11 @@ void WmfVideoDecoder::queueInputBuffer(std::shared_ptr<AVPacketBuffer> inputBuff
   if (mPrependSequenceHeader && !mSequenceHeaderPrepended && inputBuffer->isKeyFrame()
       && mInputFormat != nullptr) {
     const auto& csdList = mInputFormat->csdList();
-    if (!csdList.empty() && !csdList[0].empty()) {
-      const auto& sequenceHeader = csdList[0];
+    std::vector<uint8_t> sequenceHeader;
+    for (const auto& buffer : csdList) {
+      sequenceHeader.insert(sequenceHeader.end(), buffer.begin(), buffer.end());
+    }
+    if (!sequenceHeader.empty()) {
       prefixedSample.reserve(sequenceHeader.size() + sampleSize);
       prefixedSample.insert(prefixedSample.end(), sequenceHeader.begin(), sequenceHeader.end());
       prefixedSample.insert(prefixedSample.end(), data, data + sampleSize);

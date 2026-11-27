@@ -16,6 +16,8 @@
 
 #include <extractor/container/MatroskaExtractor.h>
 
+#include <minilog/log.h>
+
 #include <extractor/Utility.h>
 #include <extractor/text/SubtitleParser.h>
 

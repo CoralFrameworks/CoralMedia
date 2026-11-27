@@ -183,6 +183,8 @@ private:
   bool videoFormatPublished_ = false;
   bool videoUnsupported_ = false;
   bool hasOutputKeyframe_ = false;
+  bool videoFirstSample_ = false;
+  bool audioFirstSample_ = false;
   int nalUnitLengthFieldLength_ = 0;
   int frameType_ = 0;
   std::shared_ptr<AVTrackOutput> videoOutput_;

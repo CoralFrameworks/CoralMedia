@@ -29,7 +29,6 @@ SimpleAudioDecoder::SimpleAudioDecoder(
     bool outputFloat) noexcept
     : SimpleDecoder(numInputBuffers, numOutputBuffers),
       outputFloat(outputFloat) {
-  av_register_all();
   cachePacket = std::unique_ptr<AVPacket, AVPacketDeleter>(av_packet_alloc());
   cacheFrame = std::unique_ptr<AVFrame, AVFrameDeleter>(av_frame_alloc());
 }
@@ -86,7 +85,7 @@ SimpleAudioDecoder::decodeBuffer(const std::shared_ptr<AVPacketBuffer>& inputBuf
   packet->size = inputBuffer->size();
   // convert pts to decoder context's time base
   packet->dts = packet->pts =
-      av_rescale_q(inputBuffer->timeUs(), AV_TIME_BASE_Q, mCodecContext->time_base);
+      av_rescale_q(inputBuffer->timeUs(), AVRational{1, AV_TIME_BASE}, mCodecContext->time_base);
   packet->stream_index = inputBuffer->streamIndex();
 
   if (resampledBuffer == nullptr) {
@@ -192,8 +191,8 @@ void SimpleAudioDecoder::ffmpegInitialize(const std::string& codecName,
     if (mCodecContext->sample_rate == 0) {
       mCodecContext->sample_rate = rawSampleRate;
     }
-    if (mCodecContext->channels == 0) {
-      mCodecContext->channels = rawChannelCount;
+    if (ffChannels(mCodecContext.get()) == 0) {
+      ffSetChannels(mCodecContext.get(), rawChannelCount);
     }
   }
 }
@@ -224,7 +223,7 @@ AVCodecContext* SimpleAudioDecoder::createContext(
   if (context->codec_id == AV_CODEC_ID_PCM_MULAW
       || context->codec_id == AV_CODEC_ID_PCM_ALAW) {
     context->sample_rate = rawSampleRate;
-    context->channels = rawChannelCount;
+    ffSetChannels(context, rawChannelCount);
   }
   context->err_recognition = AV_EF_IGNORE_ERR;
   int result = avcodec_open2(context, codec, nullptr);
@@ -258,8 +257,8 @@ void SimpleAudioDecoder::resetDecoder() {
   if (mCodecContext->sample_rate == 0) {
     mCodecContext->sample_rate = outputConfig.sampleRate;
   }
-  if (mCodecContext->channels == 0) {
-    mCodecContext->channels = outputConfig.channelCount;
+  if (ffChannels(mCodecContext.get()) == 0) {
+    ffSetChannels(mCodecContext.get(), outputConfig.channelCount);
   }
 }
 
@@ -273,7 +272,7 @@ int SimpleAudioDecoder::decodePacket(AVPacket* inputPacket,
   // Sends audio packet to decode
   result = avcodec_send_packet(context, inputPacket);
   if (result) {
-    MINILOG_ERROR("Failed to call avcodec_send_packet: {}", av_err2str(result));
+    MINILOG_ERROR("Failed to call avcodec_send_packet: {}", ffErrorString(result));
     return result == AVERROR_INVALIDDATA ? CODEC_ERROR_INVALID_DATA
                                          : CODEC_ERROR_OTHER;
   }
@@ -289,7 +288,7 @@ int SimpleAudioDecoder::decodePacket(AVPacket* inputPacket,
       } else if (result == AVERROR_EOF) {
         return CODEC_ERROR_EOF;
       }
-      MINILOG_ERROR("Failed to call avcodec_receive_frame: {}", av_err2str(result));
+      MINILOG_ERROR("Failed to call avcodec_receive_frame: {}", ffErrorString(result));
       return CODEC_ERROR_INVALID_DATA;
     }
 
@@ -299,8 +298,8 @@ int SimpleAudioDecoder::decodePacket(AVPacket* inputPacket,
       resampleContext = (SwrContext*)context->opaque;
     } else {
       resampleContext = swr_alloc();
-      av_opt_set_int(resampleContext, "in_channel_layout", (int64_t)context->channel_layout, 0);
-      av_opt_set_int(resampleContext, "out_channel_layout", (int64_t)context->channel_layout, 0);
+      ffSetSwrChannelLayout(resampleContext, "in_chlayout", ffChannels(context));
+      ffSetSwrChannelLayout(resampleContext, "out_chlayout", ffChannels(context));
       av_opt_set_int(resampleContext, "in_sample_rate", context->sample_rate, 0);
       av_opt_set_int(resampleContext, "out_sample_rate", (int64_t)context->sample_rate, 0);
       av_opt_set_int(resampleContext, "in_sample_fmt", context->sample_fmt, 0);
@@ -308,7 +307,7 @@ int SimpleAudioDecoder::decodePacket(AVPacket* inputPacket,
       av_opt_set_int(resampleContext, "out_sample_fmt", context->request_sample_fmt, 0);
       result = swr_init(resampleContext);
       if (result < 0) {
-        MINILOG_ERROR("Failed to call swr_init: {}", av_err2str(result));
+        MINILOG_ERROR("Failed to call swr_init: {}", ffErrorString(result));
         av_frame_unref(cacheFrame.get());
         swr_free(&resampleContext);
         return CODEC_ERROR_INVALID_DATA;
@@ -321,7 +320,7 @@ int SimpleAudioDecoder::decodePacket(AVPacket* inputPacket,
         cacheFrame->nb_samples,
         context->sample_rate, cacheFrame->sample_rate, AV_ROUND_INF);
     int resampledBufferSize = av_samples_get_buffer_size(
-        nullptr, context->channels, resample_nb_samples, context->request_sample_fmt, 0);
+        nullptr, ffChannels(context), resample_nb_samples, context->request_sample_fmt, 0);
     if (outSize + resampledBufferSize > outputSize) {
       av_frame_unref(cacheFrame.get());
       MINILOG_ERROR("Output buffer size {} too small for output data {}", outputSize, (outSize + resampledBufferSize));
@@ -334,7 +333,7 @@ int SimpleAudioDecoder::decodePacket(AVPacket* inputPacket,
         cacheFrame->nb_samples);
     av_frame_unref(cacheFrame.get());
     if (result < 0) {
-      MINILOG_ERROR("swr_convert error: {}", av_err2str(result));
+      MINILOG_ERROR("swr_convert error: {}", ffErrorString(result));
       return CODEC_ERROR_INVALID_DATA;
     }
 

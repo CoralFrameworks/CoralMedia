@@ -32,7 +32,6 @@ FfmpegVideoEncoder::FfmpegVideoEncoder()
       requestEof(false),
       flushed(false),
       pCodecContext(nullptr) {
-  avcodec_register_all();
   cacheFrame = std::unique_ptr<AVFrame, AVFrameDeleter>(av_frame_alloc());
   cachePacket = std::unique_ptr<AVPacket, AVPacketDeleter>(av_packet_alloc());
 }
@@ -213,7 +212,7 @@ bool FfmpegVideoEncoder::encode() {
   }
 
   // prepare cache fame
-  cacheFrame->pts = av_rescale_q(inputBuffer->timeUs(), AV_TIME_BASE_Q, pCodecContext->time_base);
+  cacheFrame->pts = av_rescale_q(inputBuffer->timeUs(), AVRational{1, AV_TIME_BASE}, pCodecContext->time_base);
   // encode video frame
   if (inputBuffer->getFormat() == PixelFormat::kFormatI420) {
     auto i420Buffer = (I420PixelBuffer *)(inputBuffer.get());
@@ -293,7 +292,7 @@ bool FfmpegVideoEncoder::initEncoder() {
 
   // open video encoder
   if ((ret = avcodec_open2(pCodecContext.get(), codec, nullptr)) < 0) {
-    MINILOG_ERROR("Failed to open video encoder, result: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to open video encoder, result: {}", ffErrorString(ret));
     pCodecContext.reset();
     return false;
   }
@@ -364,7 +363,7 @@ void FfmpegVideoEncoder::encodeFrame(AVFrame *frame) {
   // send video frame to encode
   ret = avcodec_send_frame(pCodecContext.get(), frame);
   if (ret < 0) {
-    MINILOG_ERROR("Failed to call avcodec_send_frame: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to call avcodec_send_frame: {}", ffErrorString(ret));
     return;
   }
 
@@ -382,7 +381,7 @@ void FfmpegVideoEncoder::encodeFrame(AVFrame *frame) {
       queueOutputBuffer(std::move(outputBuffer));
       break;
     } else if (ret < 0) {
-      MINILOG_ERROR("Failed to call avcodec_receive_packet: {}", av_err2str(ret));
+      MINILOG_ERROR("Failed to call avcodec_receive_packet: {}", ffErrorString(ret));
       break;
     } else {
       auto buffer = dequeueAvailableOutputBuffer();
@@ -390,7 +389,7 @@ void FfmpegVideoEncoder::encodeFrame(AVFrame *frame) {
       if (packet->flags & AV_PKT_FLAG_KEY) {
         buffer->setFlags(AVBufferFlags::kKeyFrame);
       }
-      auto timeUs = av_rescale_q(packet->pts, pCodecContext->time_base, AV_TIME_BASE_Q);
+      auto timeUs = av_rescale_q(packet->pts, pCodecContext->time_base, AVRational{1, AV_TIME_BASE});
       buffer->timeUs(timeUs);
       auto outputBuffer = buffer->data();
       outputBuffer->position(0);

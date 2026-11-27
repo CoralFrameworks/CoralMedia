@@ -23,7 +23,6 @@
 namespace coral {
 
 FfmpegMuxer::FfmpegMuxer() : pFormatContext(nullptr) {
-  av_register_all();
   mCachePacket = std::unique_ptr<AVPacket, AVPacketDeleter>(av_packet_alloc());
 }
 
@@ -53,7 +52,7 @@ bool FfmpegMuxer::prepare(std::string url, const MuxerFormat format) {
   auto ret = avformat_alloc_output_context2(&formatContext, nullptr, formatStr,
       mOutputUrl.c_str());
   if (!formatContext || ret < 0) {
-    MINILOG_ERROR("Failed to create muxer context: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to create muxer context: {}", ffErrorString(ret));
     return false;
   }
   pFormatContext.reset(formatContext);
@@ -119,13 +118,13 @@ void FfmpegMuxer::writeFrame(const std::shared_ptr<AVPacketBuffer> &buffer) {
   mCachePacket->size = (int)buffer->size();
   mCachePacket->stream_index = buffer->streamIndex();
   auto time_base = pFormatContext->streams[mCachePacket->stream_index]->time_base;
-  mCachePacket->pts = av_rescale_q(buffer->timeUs(), AV_TIME_BASE_Q, time_base);
+  mCachePacket->pts = av_rescale_q(buffer->timeUs(), AVRational{1, AV_TIME_BASE}, time_base);
   memcpy(mCachePacket->data, buffer->array(), buffer->size());
   auto ret = av_interleaved_write_frame(pFormatContext.get(), mCachePacket.get());
   if (ret < 0) {
     MINILOG_ERROR(
         "Failed to write buffer to the muxer: {}, pts: {}, buffer timeUs: {}, buffer size: {}, media type: {}",
-        av_err2str(ret), mCachePacket->pts, buffer->timeUs(), buffer->size(), convertToText(buffer->getMediaType()));
+        ffErrorString(ret), mCachePacket->pts, buffer->timeUs(), buffer->size(), convertToText(buffer->getMediaType()));
   }
 }
 
@@ -189,11 +188,9 @@ int FfmpegMuxer::addAudioTrack(AVCodecID codecId, int sampleRate,
   }
   auto stream = createStream(codecId);
   if (stream != nullptr) {
-    stream->time_base = (AVRational){1, sampleRate};
+    stream->time_base = AVRational{1, sampleRate};
     stream->codecpar->sample_rate = sampleRate;
-    stream->codecpar->channels = channelCount;
-    stream->codecpar->channel_layout =
-        (uint64_t)av_get_default_channel_layout(channelCount);
+    ffSetChannels(stream->codecpar, channelCount);
     stream->codecpar->bit_rate = bitRate;
     stream->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
     stream->codecpar->codec_id = codecId;
@@ -286,7 +283,7 @@ int FfmpegMuxer::writeTrailer() {
   }
   int ret = av_write_trailer(pFormatContext.get());
   if (ret < 0) {
-    MINILOG_ERROR("Failed to call av_write_trailer: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to call av_write_trailer: {}", ffErrorString(ret));
     return ret;
   }
   return 0;

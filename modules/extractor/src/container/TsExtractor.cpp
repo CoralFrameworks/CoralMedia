@@ -61,6 +61,8 @@ constexpr size_t kMaxBufferSize = 512U * 1024U;
 constexpr int64_t kPtsWrapUs = (1LL << 33) * 1000000 / 90000;
 
 /** The elementary stream types that the extractor understands. */
+constexpr int kStreamTypeMpeg1Video = 0x01;
+constexpr int kStreamTypeMpeg2Video = 0x02;
 constexpr int kStreamTypeMpegAudio = 0x03;
 constexpr int kStreamTypeMpegAudioLsf = 0x04;
 constexpr int kStreamTypeAacAdts = 0x0F;
@@ -94,6 +96,8 @@ uint32_t readUInt32(const uint8_t* data) {
 /** Returns whether the given stream type is one that the extractor creates a track for. */
 bool isSupportedStreamType(const int streamType) {
   switch (streamType) {
+    case kStreamTypeMpeg1Video:
+    case kStreamTypeMpeg2Video:
     case kStreamTypeH264:
     case kStreamTypeH265:
     case kStreamTypeAacAdts:
@@ -111,6 +115,8 @@ bool isSupportedStreamType(const int streamType) {
 /** Returns the media type of a supported stream type. */
 MediaType mediaTypeForStreamType(const int streamType) {
   switch (streamType) {
+    case kStreamTypeMpeg1Video:
+    case kStreamTypeMpeg2Video:
     case kStreamTypeH264:
     case kStreamTypeH265: {
       return MediaType::kMediaTypeVideo;
@@ -885,6 +891,11 @@ void AVTsExtractor::processPes(Stream& stream) {
   // addSeekPoint uses the position of the first transport packet of the PES packet.
   stream.pesStartPosition = pesStartPosition;
   switch (stream.streamType) {
+    case kStreamTypeMpeg1Video:
+    case kStreamTypeMpeg2Video: {
+      consumeMpeg2(stream, body, bodySize, timeUs);
+      break;
+    }
     case kStreamTypeH264: {
       consumeH264(stream, body, bodySize, timeUs);
       break;
@@ -1095,6 +1106,49 @@ bool AVTsExtractor::publishH265Format(Stream& stream) {
   stream.output->format(format);
   stream.formatPublished = true;
   return true;
+}
+
+void AVTsExtractor::consumeMpeg2(Stream& stream, const uint8_t* data, const size_t size, const int64_t timeUs) {
+  if (data == nullptr || size == 0) {
+    return;
+  }
+  // A sequence header carries the dimensions; the first one starts the format. The PES body is
+  // delivered as one sample, and an I picture marks it as a key frame.
+  if (!stream.formatPublished) {
+    int width = MediaFormat::NO_VALUE;
+    int height = MediaFormat::NO_VALUE;
+    for (size_t i = 0; i + 7 < size; ++i) {
+      if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 && data[i + 3] == 0xB3) {
+        width = (static_cast<int>(data[i + 4]) << 4) | (data[i + 5] >> 4);
+        height = ((data[i + 5] & 0x0F) << 8) | data[i + 6];
+        break;
+      }
+    }
+    if (width <= 0 || height <= 0) {
+      return;
+    }
+    auto format = MediaFormat::CreateVideoFormat(MimeTypes::VIDEO_MPEG2, width, height);
+    format->setContainerMimeType(MimeTypes::VIDEO_MP2T);
+    stream.output->format(format);
+    stream.formatPublished = true;
+  }
+
+  bool keyFrame = false;
+  for (size_t i = 0; i + 5 < size; ++i) {
+    if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 && data[i + 3] == 0x00) {
+      const int pictureCodingType = (data[i + 5] >> 3) & 0x07;
+      if (pictureCodingType == 1) {
+        keyFrame = true;
+        break;
+      }
+    }
+  }
+
+  auto buffer = std::make_shared<AVBlockBuffer>(static_cast<uint32_t>(size));
+  buffer->put(data, size);
+  buffer->position(0);
+  buffer->limit(size);
+  emitSampleBuffer(stream, std::move(buffer), size, timeUs, keyFrame ? AVSample::kFlagKeyFrame : AVSample::kFlagNone);
 }
 
 void AVTsExtractor::consumeH264(Stream& stream, const uint8_t* data, const size_t size, const int64_t timeUs) {

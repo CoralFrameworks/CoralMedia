@@ -23,7 +23,6 @@ namespace coral {
 
 std::unique_ptr<FfmpegAudioFileReader>
 FfmpegAudioFileReader::sniff(const std::string &inputUrl) {
-  av_register_all();
   avformat_network_init();
   AVFormatContext *formatContext = nullptr;
 
@@ -32,7 +31,7 @@ FfmpegAudioFileReader::sniff(const std::string &inputUrl) {
   if (ret != 0) {
     MINILOG_ERROR("Failed to prepare AVFormatContext, use platform AudioFileDecoder: {}, error: {}",
         inputUrl,
-        av_err2str(ret));
+        ffErrorString(ret));
     avformat_close_input(&formatContext);
     return nullptr;
   }
@@ -43,7 +42,7 @@ FfmpegAudioFileReader::sniff(const std::string &inputUrl) {
 
   ret = avformat_find_stream_info(formatContext, nullptr);
   if (ret < 0) {
-    MINILOG_ERROR("Failed to call avformat_find_stream_info: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to call avformat_find_stream_info: {}", ffErrorString(ret));
     avformat_close_input(&formatContext);
     return nullptr;
   }
@@ -55,7 +54,6 @@ FfmpegAudioFileReader::FfmpegAudioFileReader(AVFormatContext *formatContext) noe
       mOutputType(AudioSampleFormat::kDefault), mSampleRate(0),
       mChannelCount(0), mSampleLength(Definitions::kInvalidValue),
       mFramePosition(Definitions::kPositionUnset), pAudioFifo(nullptr) {
-  av_register_all();
   avformat_network_init();
   pFormatContext.reset(formatContext);
   mCacheFrame = std::unique_ptr<AVFrame, AVFrameDeleter>(av_frame_alloc());
@@ -117,13 +115,13 @@ void FfmpegAudioFileReader::seekTo(int64_t framePosition) {
   auto position = av_rescale_q(framePosition, {1, codecpar->sample_rate},
       stream->time_base);
   if (pFormatContext->start_time != AV_NOPTS_VALUE) {
-    position += av_rescale_q(pFormatContext->start_time, AV_TIME_BASE_Q,
+    position += av_rescale_q(pFormatContext->start_time, AVRational{1, AV_TIME_BASE},
         stream->time_base);
   }
   auto ret = av_seek_frame(pFormatContext.get(), mStreamIndex, position,
       AVSEEK_FLAG_BACKWARD);
   if (ret < 0) {
-    MINILOG_ERROR("Failed to seek to frame position: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to seek to frame position: {}", ffErrorString(ret));
   }
 }
 
@@ -142,7 +140,7 @@ int64_t FfmpegAudioFileReader::readIntoBuffer(uint8_t *data, int64_t bufferSize,
 
   auto bytePerSample =
       av_get_bytes_per_sample(pCodecContext->request_sample_fmt);
-  auto bytePerFrame = bytePerSample * pCodecContext->channels;
+  auto bytePerFrame = bytePerSample * ffChannels(pCodecContext.get());
   auto numFrames = bufferSize / bytePerFrame;
 
   auto packet = mCachePacket.get();
@@ -158,7 +156,7 @@ int64_t FfmpegAudioFileReader::readIntoBuffer(uint8_t *data, int64_t bufferSize,
       mReadEof = true;
       break;
     } else if (error < 0) {
-      MINILOG_ERROR("Failed to read frame: {}", av_err2str(error));
+      MINILOG_ERROR("Failed to read frame: {}", ffErrorString(error));
       break;
     }
 
@@ -191,7 +189,7 @@ int64_t FfmpegAudioFileReader::readIntoBuffer(uint8_t *data, int64_t bufferSize,
       mReadEof = true;
       av_packet_unref(packet);
     } else if (error < 0) {
-      MINILOG_ERROR("Failed to decode frame: {}", av_err2str(error));
+      MINILOG_ERROR("Failed to decode frame: {}", ffErrorString(error));
       av_packet_unref(packet);
     } else {
       if (!resampleAndStoreFrame(pCodecContext.get(), pAudioFifo.get(),
@@ -207,7 +205,7 @@ int64_t FfmpegAudioFileReader::readIntoBuffer(uint8_t *data, int64_t bufferSize,
     auto framesRead =
         av_audio_fifo_read(pAudioFifo.get(), (void **)&data, frameSize);
     if (framesRead < 0) {
-      MINILOG_ERROR("Failed to read from audio fifo: {}", av_err2str(framesRead));
+      MINILOG_ERROR("Failed to read from audio fifo: {}", ffErrorString(framesRead));
     }
     return framesRead;
   }
@@ -246,7 +244,7 @@ bool FfmpegAudioFileReader::prepareDecoder(int streamIndex, Error **outError) {
 
   // Open the decoder for the audio stream to use it later.
   if ((error = avcodec_open2(pCodecContext.get(), codec, nullptr)) < 0) {
-    handleError(outError, "Failed to open audio decoder!", av_err2str(error));
+    handleError(outError, "Failed to open audio decoder!", ffErrorString(error).c_str());
     pCodecContext.reset();
     return false;
   }
@@ -256,7 +254,7 @@ bool FfmpegAudioFileReader::prepareDecoder(int streamIndex, Error **outError) {
 
   mStreamIndex = streamIndex;
   mSampleRate = pCodecContext->sample_rate;
-  mChannelCount = pCodecContext->channels;
+  mChannelCount = ffChannels(pCodecContext.get());
 
   // find out the file format
   if (mOutputType == AudioSampleFormat::kDefault) {
@@ -278,7 +276,7 @@ bool FfmpegAudioFileReader::prepareDecoder(int streamIndex, Error **outError) {
     }
   }
   auto fifo = av_audio_fifo_alloc(pCodecContext->request_sample_fmt,
-      pCodecContext->channels, 1);
+      ffChannels(pCodecContext.get()), 1);
   pAudioFifo.reset(fifo);
 
   return initResample();
@@ -286,10 +284,8 @@ bool FfmpegAudioFileReader::prepareDecoder(int streamIndex, Error **outError) {
 
 bool FfmpegAudioFileReader::initResample() {
   auto resampleContext = swr_alloc();
-  av_opt_set_int(resampleContext, "in_channel_layout",
-      pCodecContext->channel_layout, 0);
-  av_opt_set_int(resampleContext, "out_channel_layout",
-      pCodecContext->channel_layout, 0);
+  ffSetSwrChannelLayout(resampleContext, "in_chlayout", ffChannels(pCodecContext.get()));
+  ffSetSwrChannelLayout(resampleContext, "out_chlayout", ffChannels(pCodecContext.get()));
   av_opt_set_int(resampleContext, "in_sample_rate", pCodecContext->sample_rate,
       0);
   av_opt_set_int(resampleContext, "out_sample_rate", pCodecContext->sample_rate,
@@ -301,7 +297,7 @@ bool FfmpegAudioFileReader::initResample() {
       pCodecContext->request_sample_fmt, 0);
   auto result = swr_init(resampleContext);
   if (result < 0) {
-    MINILOG_ERROR("Failed to call swr_init: {}", av_err2str(result));
+    MINILOG_ERROR("Failed to call swr_init: {}", ffErrorString(result));
     swr_free(&resampleContext);
     return false;
   }
@@ -354,7 +350,7 @@ bool FfmpegAudioFileReader::initConvertedSamples(uint8_t ***convertedSamples,
    * channels (although it may be NULL for interleaved formats).
    */
   if (!(
-      *convertedSamples = (uint8_t **)calloc(codecContext->channels, sizeof(**convertedSamples)))) {
+      *convertedSamples = (uint8_t **)calloc(ffChannels(codecContext), sizeof(**convertedSamples)))) {
     MINILOG_ERROR("Could not allocate converted input sample pointers");
     return false;
   }
@@ -362,9 +358,9 @@ bool FfmpegAudioFileReader::initConvertedSamples(uint8_t ***convertedSamples,
   /* Allocate memory for the samples of all channels in one consecutive
    * block for convenience. */
   if ((
-      error = av_samples_alloc(*convertedSamples, nullptr, codecContext->channels,
+      error = av_samples_alloc(*convertedSamples, nullptr, ffChannels(codecContext),
           frameSize, codecContext->sample_fmt, 0)) < 0) {
-    MINILOG_ERROR("Could not allocate converted input samples (error {})", av_err2str(error));
+    MINILOG_ERROR("Could not allocate converted input samples (error {})", ffErrorString(error));
     av_freep(&(*convertedSamples)[0]);
     free(*convertedSamples);
     return false;
@@ -380,7 +376,7 @@ bool FfmpegAudioFileReader::convertSamples(SwrContext *resampleContext,
 
   /* Convert the samples using the resampler. */
   if ((error = swr_convert(resampleContext, convertedData, frameSize, inputData,frameSize)) < 0) {
-    MINILOG_ERROR("Could not convert input samples (error {})", av_err2str(error));
+    MINILOG_ERROR("Could not convert input samples (error {})", ffErrorString(error));
     return false;
   }
   return true;

@@ -184,6 +184,9 @@ private:
   /** Consumes the body of an H.264 PES packet. */
   void consumeH264(Stream& stream, const uint8_t* data, size_t size, int64_t timeUs);
 
+  /** Consumes the body of an MPEG-1/MPEG-2 video PES packet. */
+  void consumeMpeg2(Stream& stream, const uint8_t* data, size_t size, int64_t timeUs);
+
   /** Consumes the body of an H.265 PES packet. */
   void consumeH265(Stream& stream, const uint8_t* data, size_t size, int64_t timeUs);
 

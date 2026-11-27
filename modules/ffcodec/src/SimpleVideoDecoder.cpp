@@ -26,7 +26,6 @@
 namespace coral {
 
 SimpleVideoDecoder::SimpleVideoDecoder() : SimpleDecoder(NUM_BUFFERS, NUM_BUFFERS) {
-  av_register_all();
   mCacheFrame = std::unique_ptr<AVFrame, AVFrameDeleter>(av_frame_alloc());
   mCachePacket = std::unique_ptr<AVPacket, AVPacketDeleter>(av_packet_alloc());
 }
@@ -65,21 +64,26 @@ SimpleVideoDecoder::decodeBuffer(const std::shared_ptr<AVPacketBuffer> &inputBuf
     }
   }
 
-  // copy data to packet
+  // The packet must own its data: the decoder keeps a reference to it after avcodec_send_packet
+  // returns, and the renderer reuses the input buffer for the next frame.
   auto packet = mCachePacket.get();
   av_packet_unref(packet);
-  packet->data = inputBuffer->array();
-  packet->size = (int)inputBuffer->size();
+  const int size = static_cast<int>(inputBuffer->size());
+  if (av_new_packet(packet, size) < 0) {
+    return Error("Failed to allocate the decoder packet");
+  }
+  std::memcpy(packet->data, inputBuffer->array(), static_cast<size_t>(size));
 
   // convert pts to decoder context's time base
   auto pts = inputBuffer->timeUs();
-  packet->dts = packet->pts = av_rescale_q(pts, AV_TIME_BASE_Q, mCodecContext->time_base);
+  packet->dts = packet->pts = av_rescale_q(pts, AVRational{1, AV_TIME_BASE}, mCodecContext->time_base);
   packet->stream_index = inputBuffer->streamIndex();
   if (inputBuffer->isKeyFrame()) {
     packet->flags |= AV_PKT_FLAG_KEY;
   }
 
   int result = decodePacket(packet, outputBuffer);
+  av_packet_unref(packet);
   if (result == CODEC_ERROR_OTHER) {
     return std::nullopt;
   } else if (result == CODEC_ERROR_INVALID_DATA) {
@@ -108,7 +112,14 @@ void SimpleVideoDecoder::initDecoder(const std::shared_ptr<MediaFormat> &format)
     return;
   }
 
-  auto codec = avcodec_find_decoder(codec_id);
+  const AVCodec* codec = nullptr;
+  // FFmpeg 9's native AV1 decoder only drives hardware acceleration; the software path is libdav1d.
+  if (codec_id == AV_CODEC_ID_AV1) {
+    codec = avcodec_find_decoder_by_name("libdav1d");
+  }
+  if (codec == nullptr) {
+    codec = avcodec_find_decoder(codec_id);
+  }
   if (!codec) {
     MINILOG_ERROR("Failed to find decoder: {}", avcodec_get_name(codec_id));
     return;
@@ -133,7 +144,9 @@ void SimpleVideoDecoder::initDecoder(const std::shared_ptr<MediaFormat> &format)
   codecContext->thread_count = 1;
   codecContext->thread_type = FF_THREAD_SLICE;
 
-  codecContext->time_base = av_make_q(codecContext->framerate.num * 1000, 1);
+  // Decoder timestamps are in the packet time base; the renderer asks for microseconds, so both
+  // the input rescaler and the output one need the same definition.
+  codecContext->time_base = AVRational{1, 1'000'000};
   switch (format->getPixelFormat()) {
     case PixelFormat::kFormatI420: {
       codecContext->pix_fmt = AV_PIX_FMT_YUV420P;
@@ -156,21 +169,30 @@ void SimpleVideoDecoder::initDecoder(const std::shared_ptr<MediaFormat> &format)
   // handle extra data
   auto const &csdBuffers = format->csdList();
   if (!csdBuffers.empty()) {
-    auto extraData = csdBuffers[0].data();
-    size_t size = csdBuffers[0].size();
-    codecContext->extradata_size = (int)size;
+    // The CSD list holds one entry per parameter set (SPS and PPS for H.264). The decoder needs all
+    // of them in extradata; using only the first one made FLV fail with "Invalid data" because the
+    // PPS of its sequence header was dropped.
+    size_t size = 0;
+    for (const auto& buffer : csdBuffers) {
+      size += buffer.size();
+    }
+    codecContext->extradata_size = static_cast<int>(size);
     codecContext->extradata = (uint8_t *)av_malloc(size + AV_INPUT_BUFFER_PADDING_SIZE);
     if (!codecContext->extradata) {
       releaseCodecContext(codecContext);
       codecContext = nullptr;
       return;
     }
-    memcpy(codecContext->extradata, extraData, size);
+    size_t offset = 0;
+    for (const auto& buffer : csdBuffers) {
+      memcpy(codecContext->extradata + offset, buffer.data(), buffer.size());
+      offset += buffer.size();
+    }
   }
 
   // open video decoder
   if ((ret = avcodec_open2(codecContext, codec, nullptr)) < 0) {
-    MINILOG_ERROR("Failed to open video decoder, result: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to open video decoder, result: {}", ffErrorString(ret));
     releaseCodecContext(codecContext);
     codecContext = nullptr;
     return;
@@ -189,21 +211,34 @@ int SimpleVideoDecoder::decodePacket(AVPacket *inputPacket, const std::shared_pt
 
   // Sends video packet to decode
   result = avcodec_send_packet(mCodecContext.get(), inputPacket);
-  if (result) {
-    MINILOG_ERROR("Failed to call avcodec_send_packet: {}", av_err2str(result));
+  if (result == AVERROR(EAGAIN)) {
+    // The decoder still owns a packet whose frame was not read yet. Keep it for the next call; the
+    // caller treats this as "no output yet", not as a broken frame.
+    return CODEC_ERROR_OTHER;
+  }
+  if (result < 0) {
+    MINILOG_ERROR("Failed to call avcodec_send_packet: {}", ffErrorString(result));
     return result == AVERROR_INVALIDDATA ? CODEC_ERROR_INVALID_DATA : CODEC_ERROR_OTHER;
   }
 
   auto frame = mCacheFrame.get();
+  av_frame_unref(frame);
   result = avcodec_receive_frame(mCodecContext.get(), frame);
-  if (result) {
+  if (result == AVERROR(EAGAIN)) {
+    // VP9/AV1 buffer packets until a frame can be reconstructed. This is not an invalid frame.
+    return CODEC_ERROR_OTHER;
+  }
+  if (result == AVERROR_EOF) {
+    return CODEC_ERROR_EOF;
+  }
+  if (result < 0) {
     av_frame_unref(mCacheFrame.get());
-    MINILOG_ERROR("Failed to call avcodec_receive_frame: {}", av_err2str(result));
-    return result == AVERROR_EOF ? CODEC_ERROR_EOF : CODEC_ERROR_INVALID_DATA;
+    MINILOG_ERROR("Failed to call avcodec_receive_frame: {}", ffErrorString(result));
+    return CODEC_ERROR_INVALID_DATA;
   }
 
   // Copy to output buffer
-  auto timeUs = av_rescale_q(mCacheFrame->pts, mCodecContext->time_base, AV_TIME_BASE_Q);
+  auto timeUs = av_rescale_q(mCacheFrame->pts, mCodecContext->time_base, AVRational{1, AV_TIME_BASE});
   outputBuffer->timeUs(timeUs);
   auto frameType = outputBuffer->getFormat();
   if (mCacheFrame->format == AV_PIX_FMT_NV12) {

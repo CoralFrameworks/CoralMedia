@@ -301,6 +301,19 @@ int readBits(AVBitReader& bits, const int count) {
  * Parses the SPS of an H.264 stream and returns its dimensions and the fields that identify the
  * codec.
  */
+/** Skips one AVC scaling list (the deltas are signed Exp-Golomb values). */
+void skipAvcScalingList(AVBitReader& reader, const int size) {
+  int lastScale = 8;
+  int nextScale = 8;
+  for (int i = 0; i < size; ++i) {
+    if (nextScale != 0) {
+      const int deltaScale = readSe(reader);
+      nextScale = (lastScale + deltaScale + 256) % 256;
+    }
+    lastScale = nextScale == 0 ? lastScale : nextScale;
+  }
+}
+
 bool parseAvcSps(const uint8_t* sps, const size_t size, int& outWidth, int& outHeight, int& outProfile,
   int& outCompatibility, int& outLevel) {
   if (sps == nullptr || size < 4) {
@@ -314,9 +327,29 @@ bool parseAvcSps(const uint8_t* sps, const size_t size, int& outWidth, int& outH
   AVBitReader reader(buffer);
   // The NAL header, the profile, the constraint flags and the level.
   reader.skipBits(32);
-  const int chromaFormatIdc = readUe(reader);
-  if (chromaFormatIdc == 3) {
-    reader.skipBits(1); // separate_colour_plane_flag
+  int chromaFormatIdc = 1;
+  const int profileIdc = sps[1];
+  const bool highProfile = profileIdc == 100 || profileIdc == 110 || profileIdc == 122 ||
+                           profileIdc == 244 || profileIdc == 44 || profileIdc == 83 ||
+                           profileIdc == 86 || profileIdc == 118 || profileIdc == 128 ||
+                           profileIdc == 138 || profileIdc == 139 || profileIdc == 134 ||
+                           profileIdc == 135;
+  if (highProfile) {
+    chromaFormatIdc = readUe(reader);
+    if (chromaFormatIdc == 3) {
+      reader.skipBits(1); // separate_colour_plane_flag
+    }
+    static_cast<void>(readUe(reader)); // bit_depth_luma_minus8
+    static_cast<void>(readUe(reader)); // bit_depth_chroma_minus8
+    reader.skipBits(1); // qpprime_y_zero_transform_bypass_flag
+    if (readBits(reader, 1) != 0) {
+      const int scalingListCount = chromaFormatIdc != 3 ? 8 : 12;
+      for (int i = 0; i < scalingListCount; ++i) {
+        if (readBits(reader, 1) != 0) {
+          skipAvcScalingList(reader, i < 6 ? 16 : 64);
+        }
+      }
+    }
   }
   static_cast<void>(readUe(reader)); // log2_max_frame_num_minus4
   const int picOrderCountType = readUe(reader);
@@ -525,7 +558,15 @@ void AVFlvExtractor::deliverSample(const std::shared_ptr<AVTrackOutput>& track,
   if (track == nullptr || buffer == nullptr) {
     return;
   }
-  const AVSample sample(track->id(), timeUs, flags, buffer);
+  uint32_t sampleFlags = flags;
+  if (track == videoOutput_ && !videoFirstSample_) {
+    sampleFlags |= AVSample::kFlagFirstSample;
+    videoFirstSample_ = true;
+  } else if (track == audioOutput_ && !audioFirstSample_) {
+    sampleFlags |= AVSample::kFlagFirstSample;
+    audioFirstSample_ = true;
+  }
+  const AVSample sample(track->id(), timeUs, sampleFlags, buffer);
   track->sample(sample);
 }
 
@@ -786,7 +827,7 @@ bool AVFlvExtractor::consumeVideoTag(const int64_t timeUs) {
 
   if (packetType == kAvcPacketTypeSequenceHeader) {
     if (!videoFormatPublished_) {
-      publishVideoFormat(tagData_.array() + tagData_.position(), tagData_.remaining());
+      const bool published = publishVideoFormat(tagData_.array() + tagData_.position(), tagData_.remaining());
     }
     return false;
   }
@@ -800,14 +841,14 @@ bool AVFlvExtractor::consumeVideoTag(const int64_t timeUs) {
   }
   const uint8_t* const naluData = tagData_.array() + tagData_.position();
   const size_t naluSize = tagData_.remaining();
+  const uint32_t flags = frameType_ == kVideoFrameKeyFrame ? AVSample::kFlagKeyFrame : AVSample::kFlagNone;
+  hasOutputKeyframe_ = true;
   const size_t convertedSize = AVUtil::annexBSize(naluData, naluSize, nalUnitLengthFieldLength_);
   if (convertedSize == 0) {
     return false;
   }
   std::vector<uint8_t> converted(convertedSize);
   AVUtil::toAnnexB(naluData, naluSize, nalUnitLengthFieldLength_, converted.data());
-  const uint32_t flags = frameType_ == kVideoFrameKeyFrame ? AVSample::kFlagKeyFrame : AVSample::kFlagNone;
-  hasOutputKeyframe_ = true;
   return emitVideoSample(converted.data(), convertedSize, sampleTimeUs, flags);
 }
 

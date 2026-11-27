@@ -27,13 +27,12 @@
 namespace coral {
 
 std::shared_ptr<FfmpegExtractor> FfmpegExtractor::createWithUrl(const std::string &url) {
-  av_register_all();
   avformat_network_init();
   AVFormatContext *formatContext = nullptr;
 
   auto ret = avformat_open_input(&formatContext, url.c_str(), nullptr, nullptr);
   if (ret != 0) {
-    MINILOG_ERROR("Failed to prepare AVFormatContext:{}, error: {}", url, av_err2str(ret));
+    MINILOG_ERROR("Failed to prepare AVFormatContext:{}, error: {}", url, ffErrorString(ret));
     avformat_close_input(&formatContext);
     return {};
   }
@@ -42,7 +41,7 @@ std::shared_ptr<FfmpegExtractor> FfmpegExtractor::createWithUrl(const std::strin
   if (!isRealTime(formatContext)) {
     ret = avformat_find_stream_info(formatContext, nullptr);
     if (ret < 0) {
-      MINILOG_ERROR("Failed to call avformat_find_stream_info: {}", av_err2str(ret));
+      MINILOG_ERROR("Failed to call avformat_find_stream_info: {}", ffErrorString(ret));
       avformat_close_input(&formatContext);
       return {};
     }
@@ -107,7 +106,6 @@ FfmpegExtractor::FfmpegExtractor(AVFormatContext *formatContext) noexcept
       mHasAudioTrack(false),
       mHasVideoTrack(false),
       mReadingPositionUs(Definitions::kTimeUnset) {
-  av_register_all();
   avformat_network_init();
   pCachePacket = std::unique_ptr<AVPacket, AVPacketDeleter>(av_packet_alloc());
 }
@@ -121,7 +119,6 @@ FfmpegExtractor::FfmpegExtractor(std::string url) noexcept
       mHasAudioTrack(false),
       mHasVideoTrack(false),
       mReadingPositionUs(Definitions::kTimeUnset) {
-  av_register_all();
   avformat_network_init();
   pCachePacket = std::unique_ptr<AVPacket, AVPacketDeleter>(av_packet_alloc());
 }
@@ -182,14 +179,14 @@ bool FfmpegExtractor::openFromInput(AVExtractorInput &input) {
   // owned by this extractor only once it is open, because a failed open frees it itself.
   auto ret = avformat_open_input(&formatContext, nullptr, nullptr, nullptr);
   if (ret != 0) {
-    MINILOG_ERROR("Failed to open the media of the reader: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to open the media of the reader: {}", ffErrorString(ret));
     return false;
   }
   pFormatContext = std::unique_ptr<AVFormatContext, AVFormatContextDeleter>(formatContext);
 
   ret = avformat_find_stream_info(formatContext, nullptr);
   if (ret < 0) {
-    MINILOG_ERROR("Failed to call avformat_find_stream_info: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to call avformat_find_stream_info: {}", ffErrorString(ret));
     pFormatContext.reset();
     return false;
   }
@@ -228,7 +225,7 @@ AVMediaExtractor::PlatformResult FfmpegExtractor::read(PositionHolder &seekPosit
         notifyEndOfStream();
       } else {
         result = PlatformResult::RESULT_CONTINUE;
-        MINILOG_ERROR("Failed to call av_read_frame: {}", av_err2str(ret));
+        MINILOG_ERROR("Failed to call av_read_frame: {}", ffErrorString(ret));
       }
       break;
     }
@@ -246,7 +243,7 @@ AVMediaExtractor::PlatformResult FfmpegExtractor::read(PositionHolder &seekPosit
               stream->codecpar->codec_id == AV_CODEC_ID_HEVC) {
             parseVideoBitStream(packet);
           }
-          int64_t timeUs = av_rescale_q(packet->pts, time_base, AV_TIME_BASE_Q);
+          int64_t timeUs = av_rescale_q(packet->pts, time_base, AVRational{1, AV_TIME_BASE});
           track.enqueuePacketData(packet, timeUs);
           result = PlatformResult::RESULT_CONTINUE;
           if (mReadingPositionUs == Definitions::kTimeUnset) {
@@ -334,10 +331,10 @@ std::shared_ptr<MediaFormat> FfmpegExtractor::getTrackFormat(int index) {
   }
 
   if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-    format = MediaFormat::CreateAudioFormat(mime, codecpar->sample_rate, codecpar->channels);
+    format = MediaFormat::CreateAudioFormat(mime, codecpar->sample_rate, ffChannels(codecpar));
     if (codecpar->frame_size > 0) {
       auto inputSize = av_samples_get_buffer_size(
-          nullptr, codecpar->channels, codecpar->frame_size,
+          nullptr, ffChannels(codecpar), codecpar->frame_size,
           (AVSampleFormat)codecpar->format, 1);
       format->setMaxInputSize(inputSize);
     }
@@ -379,7 +376,7 @@ std::shared_ptr<MediaFormat> FfmpegExtractor::getTrackFormat(int index) {
         av_get_sample_fmt_name((AVSampleFormat)codecpar->format),
         codecpar->bit_rate,
         codecpar->sample_rate,
-        codecpar->channels,
+        ffChannels(codecpar),
         codecpar->frame_size);
 #endif
   }
@@ -473,7 +470,7 @@ std::shared_ptr<MediaFormat> FfmpegExtractor::getTrackFormat(int index) {
       format->setAverageBitrate((int)codecpar->bit_rate);
     }
     if (stream->duration != AV_NOPTS_VALUE) {
-      auto durationUs = av_rescale_q(stream->duration, stream->time_base, AV_TIME_BASE_Q);
+      auto durationUs = av_rescale_q(stream->duration, stream->time_base, AVRational{1, AV_TIME_BASE});
       format->setDurationUs(durationUs);
     }
     format->setTrackId(stream->id);
@@ -535,7 +532,7 @@ bool FfmpegExtractor::seekTo(int64_t timeUs, SeekOption mode) {
   ret = avformat_seek_file(pFormatContext.get(), streamIndex, minSeekTime,
       seekTime, maxSeekTime, seekFlags);
   if (ret < 0) {
-    MINILOG_ERROR("Failed to seek to time: {}, error: {}", timeUs, av_err2str(ret));
+    MINILOG_ERROR("Failed to seek to time: {}, error: {}", timeUs, ffErrorString(ret));
     return false;
   }
   mReadingPositionUs = timeUs;
@@ -612,8 +609,8 @@ bool FfmpegExtractor::isRealTime(AVFormatContext *pFormatCtx) {
   }
   if (pFormatCtx->pb &&
       (
-          !strncmp(pFormatCtx->filename, "rtp:", 4)
-              || !strncmp(pFormatCtx->filename, "udp:", 4))) {
+          !strncmp(pFormatCtx->url, "rtp:", 4)
+              || !strncmp(pFormatCtx->url, "udp:", 4))) {
     return true;
   }
   return false;

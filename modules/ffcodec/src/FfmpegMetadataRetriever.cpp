@@ -24,12 +24,11 @@ namespace coral {
 
 std::unique_ptr<FfmpegMetadataRetriever>
 FfmpegMetadataRetriever::sniff(const std::string& url) {
-  av_register_all();
   avformat_network_init();
   AVFormatContext* formatContext = nullptr;
   auto ret = avformat_open_input(&formatContext, url.c_str(), nullptr, nullptr);
   if (ret != 0) {
-    MINILOG_ERROR("Failed to prepare AVFormatContext: {}, error: {}", url, av_err2str(ret));
+    MINILOG_ERROR("Failed to prepare AVFormatContext: {}, error: {}", url, ffErrorString(ret));
     avformat_close_input(&formatContext);
     return nullptr;
   }
@@ -68,7 +67,7 @@ FfmpegMetadataRetriever::getTrackFormat(int trackIndex) {
     needsFindStreamInfo = false;
     auto ret = avformat_find_stream_info(pFormatContext, nullptr);
     if (ret < 0) {
-      MINILOG_ERROR("Failed to call avformat_find_stream_info: {}", av_err2str(ret));
+      MINILOG_ERROR("Failed to call avformat_find_stream_info: {}", ffErrorString(ret));
       avformat_close_input(&pFormatContext);
       return nullptr;
     }
@@ -84,10 +83,10 @@ FfmpegMetadataRetriever::getTrackFormat(int trackIndex) {
   }
 
   if (codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-    format = MediaFormat::CreateAudioFormat(mime, codecpar->sample_rate, codecpar->channels);
+    format = MediaFormat::CreateAudioFormat(mime, codecpar->sample_rate, ffChannels(codecpar));
     if (codecpar->frame_size > 0) {
       auto inputSize = av_samples_get_buffer_size(
-          nullptr, codecpar->channels, codecpar->frame_size, (AVSampleFormat)codecpar->format, 1);
+          nullptr, ffChannels(codecpar), codecpar->frame_size, (AVSampleFormat)codecpar->format, 1);
       format->setMaxInputSize(inputSize);
     }
     if (stream->nb_frames > 0) {
@@ -154,7 +153,7 @@ FfmpegMetadataRetriever::getTrackFormat(int trackIndex) {
       format->setAverageBitrate((int)codecpar->bit_rate);
     }
     if (stream->duration != AV_NOPTS_VALUE) {
-      auto const durationUs = av_rescale_q(stream->duration, stream->time_base, AV_TIME_BASE_Q);
+      auto const durationUs = av_rescale_q(stream->duration, stream->time_base, AVRational{1, AV_TIME_BASE});
       format->setDurationUs(durationUs);
     }
     format->setTrackId(stream->id);

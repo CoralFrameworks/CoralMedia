@@ -33,7 +33,6 @@ FfmpegAudioEncoder::FfmpegAudioEncoder()
       pCodecContext(nullptr),
       pAudioFifo(nullptr),
       availableOutputBufferCount(DEFAULT_MAX_BUFFER_COUNT) {
-  av_register_all();
   mCacheFrame = std::unique_ptr<AVFrame, AVFrameDeleter>(av_frame_alloc());
   mResampleFrame = std::unique_ptr<AVFrame, AVFrameDeleter>(av_frame_alloc());
   mCachePacket = std::unique_ptr<AVPacket, AVPacketDeleter>(av_packet_alloc());
@@ -229,7 +228,7 @@ bool FfmpegAudioEncoder::encode() {
         mCacheFrame->data, mCacheFrame->linesize, inputBuffer->array(),
         mediaFormat->getChannelCount(), nb_samples, sampleFmt, 0);
     mCacheFrame->sample_rate = mediaFormat->getSampleRate();
-    mCacheFrame->channels = mediaFormat->getChannelCount();
+    ffSetChannels(mCacheFrame.get(), mediaFormat->getChannelCount());
     mCacheFrame->format = sampleFmt;
     mCacheFrame->nb_samples = nb_samples;
     if (sampleFmt != pCodecContext->sample_fmt) {
@@ -272,18 +271,16 @@ bool FfmpegAudioEncoder::initEncoder() {
   }
 
   pCodecContext->sample_rate = mediaFormat->getSampleRate();
-  pCodecContext->channels = mediaFormat->getChannelCount();
+  ffSetChannels(pCodecContext.get(), mediaFormat->getChannelCount());
   pCodecContext->bit_rate = Definitions::DEFAULT_AUDIO_BITRATE;
-  pCodecContext->channel_layout =
-      av_get_default_channel_layout(pCodecContext->channels);
-  pCodecContext->sample_fmt = codec->sample_fmts[0];
+  pCodecContext->sample_fmt = ffFirstSampleFormat(codec);
   pCodecContext->time_base = AVRational{1, pCodecContext->sample_rate};
   pCodecContext->err_recognition = AV_EF_IGNORE_ERR;
 
   // open audio encoder
   if ((ret = avcodec_open2(pCodecContext.get(), codec, nullptr)) < 0) {
     pCodecContext.reset();
-    MINILOG_ERROR("Failed to open audio encoder, result: {}", av_err2str(ret));
+    MINILOG_ERROR("Failed to open audio encoder, result: {}", ffErrorString(ret));
     return false;
   }
 
@@ -363,7 +360,7 @@ bool FfmpegAudioEncoder::encodeFrame(AVFrame *frame) {
    * The output audio stream encoder is used to do this. */
   error = avcodec_send_frame(pCodecContext.get(), frame);
   if (error < 0 && error != AVERROR_EOF) {
-    MINILOG_ERROR("Failed to call avcodec_send_frame: {}", av_err2str(error));
+    MINILOG_ERROR("Failed to call avcodec_send_frame: {}", ffErrorString(error));
     return false;
   }
 
@@ -380,7 +377,7 @@ bool FfmpegAudioEncoder::encodeFrame(AVFrame *frame) {
     queueOutputBuffer(std::move(outputBuffer));
     return true;
   } else if (error < 0) {
-    MINILOG_ERROR("Failed to call avcodec_receive_packet: ｛｝", av_err2str(error));
+    MINILOG_ERROR("Failed to call avcodec_receive_packet: ｛｝", ffErrorString(error));
     return false;
   } else {
     auto buffer = dequeueAvailableOutputBuffer();
@@ -388,7 +385,7 @@ bool FfmpegAudioEncoder::encodeFrame(AVFrame *frame) {
     if (packet->flags & AV_PKT_FLAG_KEY) {
       buffer->setFlags(AVBufferFlags::kKeyFrame);
     }
-    auto timeUs = av_rescale_q(packet->pts, pCodecContext->time_base, AV_TIME_BASE_Q);
+    auto timeUs = av_rescale_q(packet->pts, pCodecContext->time_base, AVRational{1, AV_TIME_BASE});
     buffer->timeUs(timeUs);
     auto outputBuffer = buffer->data();
     outputBuffer->position(0);
@@ -449,10 +446,8 @@ bool FfmpegAudioEncoder::initResample() {
   auto sampleFmt = FfmpegUtils::convertToSampleFormat(mediaFormat->getSampleFormat());
   if (sampleFmt != pCodecContext->sample_fmt) {
     auto resampleContext = swr_alloc();
-    av_opt_set_int(resampleContext, "in_channel_layout",
-        av_get_default_channel_layout(mediaFormat->getChannelCount()), 0);
-    av_opt_set_int(resampleContext, "out_channel_layout",
-        (int64_t)pCodecContext->channel_layout, 0);
+    ffSetSwrChannelLayout(resampleContext, "in_chlayout", mediaFormat->getChannelCount());
+    ffSetSwrChannelLayout(resampleContext, "out_chlayout", ffChannels(pCodecContext.get()));
     av_opt_set_int(resampleContext, "in_sample_rate", mediaFormat->getSampleRate(),
         0);
     av_opt_set_int(resampleContext, "out_sample_rate",
@@ -462,11 +457,11 @@ bool FfmpegAudioEncoder::initResample() {
     auto result = swr_init(resampleContext);
     if (result < 0) {
       swr_free(&resampleContext);
-      MINILOG_ERROR("Failed to call swr_init: {}", av_err2str(result));
+      MINILOG_ERROR("Failed to call swr_init: {}", ffErrorString(result));
       return false;
     }
     pCodecContext->opaque = resampleContext;
-    pAudioFifo = av_audio_fifo_alloc(pCodecContext->sample_fmt, pCodecContext->channels, 1);
+    pAudioFifo = av_audio_fifo_alloc(pCodecContext->sample_fmt, ffChannels(pCodecContext.get()), 1);
   } else {
     pCodecContext->opaque = nullptr;
   }
@@ -485,7 +480,7 @@ bool FfmpegAudioEncoder::initConvertedSamples(uint8_t ***converted_input_samples
    */
   if (!(
       *converted_input_samples = (uint8_t**)calloc(
-          codecContext->channels, sizeof(**converted_input_samples)))) {
+          ffChannels(codecContext), sizeof(**converted_input_samples)))) {
     MINILOG_ERROR("Could not allocate converted input sample pointers.");
     return false;
   }
@@ -496,11 +491,11 @@ bool FfmpegAudioEncoder::initConvertedSamples(uint8_t ***converted_input_samples
    */
   if ((
       error = av_samples_alloc(*converted_input_samples, nullptr,
-          codecContext->channels, frame_size,
+          ffChannels(codecContext), frame_size,
           codecContext->sample_fmt, 0)) < 0) {
     av_freep(&(*converted_input_samples)[0]);
     free(*converted_input_samples);
-    MINILOG_ERROR("Could not allocate converted input samples (error {}).", av_err2str(error));
+    MINILOG_ERROR("Could not allocate converted input samples (error {}).", ffErrorString(error));
     return false;
   }
   return true;
@@ -514,7 +509,7 @@ bool FfmpegAudioEncoder::convertSamples(SwrContext *resampleContext,
 
   /* Convert the samples using the resampler. */
   if ((error = swr_convert(resampleContext, convertedData, frameSize, inputData, frameSize)) < 0) {
-    MINILOG_ERROR("Could not convert input samples (error {})", av_err2str(error));
+    MINILOG_ERROR("Could not convert input samples (error {})", ffErrorString(error));
     return false;
   }
   return true;
@@ -551,7 +546,7 @@ bool FfmpegAudioEncoder::initOutputFrame(AVFrame **frame, AVCodecContext *codecC
    * are assumed for simplicity.
    */
   (*frame)->nb_samples = frame_size;
-  (*frame)->channel_layout = codecContext->channel_layout;
+  av_channel_layout_copy(&(*frame)->ch_layout, &codecContext->ch_layout);
   (*frame)->format = codecContext->sample_fmt;
   (*frame)->sample_rate = codecContext->sample_rate;
 
@@ -560,7 +555,7 @@ bool FfmpegAudioEncoder::initOutputFrame(AVFrame **frame, AVCodecContext *codecC
    * sure that the audio frame can hold as many samples as specified.
    */
   if ((error = av_frame_get_buffer(*frame, 0)) < 0) {
-    MINILOG_ERROR("Could not allocate output frame samples (error {})", av_err2str(error));
+    MINILOG_ERROR("Could not allocate output frame samples (error {})", ffErrorString(error));
     return false;
   }
   return true;

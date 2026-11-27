@@ -22,6 +22,7 @@
 
 extern "C" {
 #include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
 #include <libavutil/audio_fifo.h>
@@ -36,6 +37,53 @@ extern "C" {
 }
 
 namespace coral {
+
+/**
+ * FFmpeg moved the channel count into AVChannelLayout. The code keeps asking for a count, so these
+ * helpers translate between the count and the layout (and set the default layout of a count).
+ */
+inline int ffChannels(const AVCodecContext* context) { return context->ch_layout.nb_channels; }
+inline int ffChannels(const AVCodecParameters* parameters) { return parameters->ch_layout.nb_channels; }
+inline int ffChannels(const AVFrame* frame) { return frame->ch_layout.nb_channels; }
+
+inline void ffSetChannels(AVCodecContext* context, const int channels) {
+  av_channel_layout_uninit(&context->ch_layout);
+  av_channel_layout_default(&context->ch_layout, channels);
+}
+inline void ffSetChannels(AVCodecParameters* parameters, const int channels) {
+  av_channel_layout_uninit(&parameters->ch_layout);
+  av_channel_layout_default(&parameters->ch_layout, channels);
+}
+inline void ffSetChannels(AVFrame* frame, const int channels) {
+  av_channel_layout_uninit(&frame->ch_layout);
+  av_channel_layout_default(&frame->ch_layout, channels);
+}
+
+/** Formats an FFmpeg error code. av_err2str() is a C compound literal and does not compile as C++. */
+inline std::string ffErrorString(const int error) {
+  char buffer[AV_ERROR_MAX_STRING_SIZE]{};
+  av_strerror(error, buffer, sizeof(buffer));
+  return buffer;
+}
+
+/** The first sample format the codec supports, or AV_SAMPLE_FMT_NONE. */
+inline AVSampleFormat ffFirstSampleFormat(const AVCodec* codec) {
+  const AVSampleFormat* formats = nullptr;
+  int count = 0;
+  if (avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+          reinterpret_cast<const void**>(&formats), &count) < 0 ||
+      formats == nullptr || count <= 0) {
+    return AV_SAMPLE_FMT_NONE;
+  }
+  return formats[0];
+}
+
+inline void ffSetSwrChannelLayout(SwrContext* context, const char* name, const int channels) {
+  AVChannelLayout layout{};
+  av_channel_layout_default(&layout, channels);
+  av_opt_set_chlayout(context, name, &layout, 0);
+  av_channel_layout_uninit(&layout);
+}
 
 /**
  * A utility class for Ffmpeg.
